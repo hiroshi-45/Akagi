@@ -1,13 +1,8 @@
 from __future__ import annotations
-import loguru
-from loguru import logger as main_logger
-from datetime import datetime
-from pathlib import Path
 
-# Log to: "./Logs/rpc_client_<timestamp>.log"
-log_path = Path().cwd() / "logs" / f"rpc_client_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-logger: loguru.Logger = main_logger.bind(module="rpc_client")
-main_logger.add(log_path, level="DEBUG", filter=lambda record: record["extra"].get("module") == "rpc_client")
+from akagi.logging_utils import setup_logger
+
+logger = setup_logger("rpc_client")
 
 import time
 import queue

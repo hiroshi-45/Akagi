@@ -1,32 +1,33 @@
-import threading
-import traceback
+import json
+import logging
+import os
 import queue
-import time
 import re
-from pathlib import Path
-from dataclasses import dataclass
+import smtplib
+import ssl
+import subprocess
+import threading
+import time
+import traceback
 from collections import deque
-from typing import Any
-from playwright.sync_api import Page
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import pyautogui
+import requests
+from email.header import Header
+from email.mime.text import MIMEText
+from email.utils import formatdate, make_msgid, formataddr
 from playwright.sync_api import (
     sync_playwright, Playwright, Browser, Page, WebSocket,
     TimeoutError as PWTimeout,
 )
 
-from email.header import Header
-from email.utils import formatdate, make_msgid, formataddr
 from .bridge import MajsoulBridge
 from .logger import logger
 from akagi.hooks import register_page
-import os
-from datetime import datetime
-import requests
-import os, json, ssl, smtplib
-from email.mime.text import MIMEText
-from typing import Optional, Dict, Any, Tuple, List
-import logging
-import pyautogui
-import subprocess
 from .slack_listener import start_socket_mode_in_thread, stop_event, logout_event, pop_logout_ctx, pop_stop_ctx, post_in_thread, pop_login_item_nowait, normalize_slack_text, pop_authcode_item_nowait
 
 notify_log = logging.getLogger("akagi.notify")
