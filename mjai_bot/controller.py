@@ -43,6 +43,20 @@ class Controller(object):
         self.available_bots_names = bots_names
         return bots
 
+    def _get_3p_bot_name(self) -> str:
+        """Determine which 3P bot to use based on current model selection."""
+        current = settings.model if hasattr(settings, 'model') else ''
+        if current == 'akagi_supreme' and 'akagi_supreme3p' in self.available_bots_names:
+            return 'akagi_supreme3p'
+        return 'mortal3p'
+
+    def _get_4p_bot_name(self) -> str:
+        """Determine which 4P bot to use based on current model selection."""
+        current = settings.model if hasattr(settings, 'model') else ''
+        if current == 'akagi_supreme' and 'akagi_supreme' in self.available_bots_names:
+            return 'akagi_supreme'
+        return 'mortal'
+
     def react(self, events: list[dict]) -> dict:
         if settings.auto_switch_model:
             for event in events:
@@ -59,11 +73,13 @@ class Controller(object):
                         event["scores"][2] == 35000 and
                         event["scores"][3] == 0
                     ):
-                        if not self.choose_bot_name("mortal3p"):
-                            logger.error("Failed to switch to mortal3p bot")
+                        bot_name = self._get_3p_bot_name()
+                        if not self.choose_bot_name(bot_name):
+                            logger.error(f"Failed to switch to {bot_name} bot")
                     else:
-                        if not self.choose_bot_name("mortal"):
-                            logger.error("Failed to switch to mortal bot")
+                        bot_name = self._get_4p_bot_name()
+                        if not self.choose_bot_name(bot_name):
+                            logger.error(f"Failed to switch to {bot_name} bot")
                     continue
                 if self.starting_game:
                     logger.error("Event after start_game is not start_kyoku!")

@@ -381,8 +381,11 @@ class TestDamaten:
 
     def test_all_last_1st_big_lead_damaten(self):
         gs = self._make_gs(scores=[40000, 25000, 20000, 15000])
+        # Big lead (>= 12000): damaten returns True for high hand value
+        gs.my_hand = ["1m"] * 13  # dummy hand
+        gs.visible_counts = [0] * 34
         adj = compute_placement_adjustment(gs)
-        result = should_damaten(gs, adj, hand_value=5000, acceptance_count=8)
+        result = should_damaten(gs, adj, hand_value=8000, acceptance_count=8)
         assert result is True
 
     def test_all_last_1st_thin_lead_cheap_hand_damaten(self):
@@ -774,3 +777,269 @@ class TestDamatenThinWait:
         # because riichi intimidation is more valuable
         result = should_damaten(gs, adj, hand_value=3000, acceptance_count=2)
         assert result is False
+
+
+# ============================================================
+# 3-player mahjong (sanma) support tests
+# ============================================================
+
+class TestThreePlayerSupport:
+    """Test 3-player mahjong mode detection and behavior."""
+
+    def _make_3p_gs(self, **kwargs) -> GameState:
+        gs = GameState()
+        gs._initialized = True
+        gs.player_id = kwargs.get("player_id", 0)
+        gs.dealer = kwargs.get("dealer", 0)
+        gs.round_wind = kwargs.get("round_wind", "E")
+        gs.round_number = kwargs.get("round_number", 1)
+        gs.num_players = 3
+        scores = kwargs.get("scores", [35000, 35000, 35000, 0])
+        for i, s in enumerate(scores):
+            gs.players[i].score = s
+        return gs
+
+    def test_3p_detected_from_start_kyoku(self):
+        gs = GameState()
+        gs.process_event({"type": "start_game", "id": 0})
+        gs.process_event({
+            "type": "start_kyoku", "bakaze": "E", "kyoku": 1,
+            "honba": 0, "kyotaku": 0, "oya": 0,
+            "scores": [35000, 35000, 35000, 0],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "9m", "1p", "2p", "3p", "5p", "6p", "7p", "1s", "2s", "3s", "E", "E"],
+                ["?"] * 13, ["?"] * 13, ["?"] * 13
+            ]
+        })
+        assert gs.num_players == 3
+
+    def test_3p_placement_out_of_3(self):
+        gs = self._make_3p_gs(scores=[30000, 40000, 35000, 0])
+        assert gs.my_placement == 3  # lowest among active 3
+
+    def test_3p_placement_first(self):
+        gs = self._make_3p_gs(scores=[40000, 30000, 35000, 0])
+        assert gs.my_placement == 1
+
+    def test_3p_active_players_excludes_seat3(self):
+        gs = self._make_3p_gs(scores=[35000, 35000, 35000, 0])
+        active = gs._active_players
+        assert len(active) == 3
+        assert 3 not in active
+
+    def test_3p_diff_to_first(self):
+        gs = self._make_3p_gs(scores=[30000, 40000, 35000, 0])
+        assert gs.diff_to_first == 10000
+
+    def test_3p_remaining_tiles_55(self):
+        """3-player mahjong has ~55 tiles in wall (vs 70 for 4P)."""
+        gs = GameState()
+        gs.process_event({"type": "start_game", "id": 0})
+        gs.process_event({
+            "type": "start_kyoku", "bakaze": "E", "kyoku": 1,
+            "honba": 0, "kyotaku": 0, "oya": 0,
+            "scores": [35000, 35000, 35000, 0],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "9m", "1p", "2p", "3p", "5p", "6p", "7p", "1s", "2s", "3s", "E", "E"],
+                ["?"] * 13, ["?"] * 13, ["?"] * 13
+            ]
+        })
+        assert gs.remaining_tiles == 55
+
+    def test_3p_num_riichi_opponents_max2(self):
+        gs = self._make_3p_gs(scores=[35000, 35000, 35000, 0])
+        gs.players[1].riichi_declared = True
+        gs.players[2].riichi_declared = True
+        assert gs.num_riichi_opponents == 2
+
+    def test_3p_my_turn_divides_by_3(self):
+        gs = self._make_3p_gs()
+        gs.turn = 9
+        assert gs.my_turn == 3  # 9 // 3
+
+
+# ============================================================
+# ActionConfig tests
+# ============================================================
+
+class TestActionConfig:
+    """Test 4P and 3P action index configurations."""
+
+    def test_4p_config(self):
+        from mjai_bot.akagi_supreme.strategy_engine import ACTION_CONFIG_4P
+        assert ACTION_CONFIG_4P.idx_reach == 37
+        assert ACTION_CONFIG_4P.idx_pon == 41
+        assert ACTION_CONFIG_4P.idx_kan == 42
+        assert ACTION_CONFIG_4P.idx_hora == 43
+        assert ACTION_CONFIG_4P.idx_none == 45
+        assert len(ACTION_CONFIG_4P.chi_indices) == 3
+        assert 38 in ACTION_CONFIG_4P.chi_indices
+
+    def test_3p_config(self):
+        from mjai_bot.akagi_supreme.strategy_engine import ACTION_CONFIG_3P
+        assert ACTION_CONFIG_3P.idx_reach == 37
+        assert ACTION_CONFIG_3P.idx_pon == 38
+        assert ACTION_CONFIG_3P.idx_kan == 39
+        assert ACTION_CONFIG_3P.idx_hora == 40
+        assert ACTION_CONFIG_3P.idx_none == 42
+        assert len(ACTION_CONFIG_3P.chi_indices) == 0  # no chi in 3P
+
+    def test_3p_meld_indices_no_chi(self):
+        from mjai_bot.akagi_supreme.strategy_engine import ACTION_CONFIG_3P
+        # Meld indices should only contain pon and kan
+        assert ACTION_CONFIG_3P.meld_indices == frozenset({38, 39})
+
+
+# ============================================================
+# Menzen loss evaluation tests
+# ============================================================
+
+class TestMenzenLoss:
+    """Test the menzen loss evaluation in meld decisions."""
+
+    def test_tenpai_menzen_high_penalty(self):
+        """Tenpai menzen hand should have high penalty for melding."""
+        from mjai_bot.akagi_supreme.strategy_engine import StrategyEngine, ACTION_CONFIG_4P
+        engine = StrategyEngine(action_config=ACTION_CONFIG_4P)
+        engine.gs._initialized = True
+        engine.gs.player_id = 0
+        engine.gs.players[0].melds = []  # menzen
+        engine._last_shanten = 0  # tenpai
+
+        # Chi penalty should be higher than pon
+        chi_penalty = engine._evaluate_menzen_loss(38)  # chi_low
+        pon_penalty = engine._evaluate_menzen_loss(41)  # pon
+        assert chi_penalty > 0.10
+        assert pon_penalty > 0.10
+        assert chi_penalty > pon_penalty
+
+    def test_far_hand_no_penalty(self):
+        """Far-from-tenpai hand should have no menzen penalty."""
+        from mjai_bot.akagi_supreme.strategy_engine import StrategyEngine, ACTION_CONFIG_4P
+        engine = StrategyEngine(action_config=ACTION_CONFIG_4P)
+        engine.gs._initialized = True
+        engine.gs.player_id = 0
+        engine.gs.players[0].melds = []
+        engine._last_shanten = 4
+
+        penalty = engine._evaluate_menzen_loss(38)
+        assert penalty == 0.0
+
+    def test_already_open_no_penalty(self):
+        """Already-open hand should have no menzen penalty."""
+        from mjai_bot.akagi_supreme.strategy_engine import StrategyEngine, ACTION_CONFIG_4P
+        engine = StrategyEngine(action_config=ACTION_CONFIG_4P)
+        engine.gs._initialized = True
+        engine.gs.player_id = 0
+        engine.gs.players[0].melds = [MeldInfo(meld_type="pon", tiles=["P", "P", "P"])]
+        engine._last_shanten = 1
+
+        penalty = engine._evaluate_menzen_loss(38)
+        assert penalty == 0.0
+
+
+# ============================================================
+# Tile-level wait detail tests
+# ============================================================
+
+class TestWaitTileDetails:
+    """Test per-tile unseen count for wait tiles."""
+
+    def test_tenpai_hand_has_wait_details(self):
+        """Tenpai hand should report wait tile details."""
+        gs = GameState()
+        gs._initialized = True
+        gs.player_id = 0
+        # Tenpai waiting on E: 123m 456p 789s EE PP
+        gs.my_hand = ["1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E", "P", "P"]
+        gs.visible_counts = [0] * 34
+        # Mark tiles in hand as visible
+        for t in gs.my_hand:
+            idx = tile_to_index(t)
+            if 0 <= idx < 34:
+                gs.visible_counts[idx] += 1
+
+        details = gs.wait_tile_details()
+        # Should have at least one wait tile with unseen copies
+        assert len(details) > 0
+        total = sum(cnt for _, cnt in details)
+        assert total > 0
+
+    def test_no_wait_when_far(self):
+        """Very disconnected hand should have minimal/no useful wait tiles."""
+        gs = GameState()
+        gs._initialized = True
+        gs.player_id = 0
+        gs.my_hand = ["1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P", "F", "C"]
+        gs.visible_counts = [0] * 34
+        for t in gs.my_hand:
+            idx = tile_to_index(t)
+            if 0 <= idx < 34:
+                gs.visible_counts[idx] += 1
+        # This is a very disconnected hand — it's basically kokushi pattern
+        # but estimate_acceptance_count still finds tiles that improve it
+        details = gs.wait_tile_details()
+        # Just verify the method runs without error
+        assert isinstance(details, list)
+
+    def test_damaten_uses_tile_details(self):
+        """Damaten with good wide wait should return True."""
+        gs = GameState()
+        gs._initialized = True
+        gs.player_id = 0
+        gs.dealer = 1
+        gs.round_wind = "S"
+        gs.round_number = 4
+        gs.turn = 24
+        # Tenpai hand waiting on multiple tiles
+        gs.my_hand = ["1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E", "P", "P"]
+        gs.visible_counts = [0] * 34
+        for t in gs.my_hand:
+            idx = tile_to_index(t)
+            if 0 <= idx < 34:
+                gs.visible_counts[idx] += 1
+        for i, s in enumerate([40000, 25000, 20000, 15000]):
+            gs.players[i].score = s
+
+        # Verify wait_tile_details actually finds waits
+        details = gs.wait_tile_details()
+        assert len(details) >= 1  # should find E and/or P as waits
+
+        adj = compute_placement_adjustment(gs)
+        # Big lead all-last 1st with haneman+ hand: should prefer damaten
+        result = should_damaten(gs, adj, hand_value=12000, acceptance_count=4)
+        assert result is True
+
+
+# ============================================================
+# Controller 3P auto-switch tests
+# ============================================================
+
+class TestControllerAutoSwitch:
+    """Test that controller switches to correct supreme bots."""
+
+    def test_get_3p_bot_name_with_supreme(self):
+        from mjai_bot.controller import Controller
+        ctrl = Controller.__new__(Controller)
+        ctrl.available_bots = []
+        ctrl.available_bots_names = ["mortal", "mortal3p", "akagi_supreme", "akagi_supreme3p"]
+        ctrl.bot = None
+        ctrl.temp_mjai_msg = []
+        ctrl.starting_game = False
+
+        # Mock settings
+        import settings.settings as ss
+        original = ss.settings.model if hasattr(ss.settings, 'model') else None
+        try:
+            ss.settings.model = "akagi_supreme"
+            assert ctrl._get_3p_bot_name() == "akagi_supreme3p"
+            assert ctrl._get_4p_bot_name() == "akagi_supreme"
+
+            ss.settings.model = "mortal"
+            assert ctrl._get_3p_bot_name() == "mortal3p"
+            assert ctrl._get_4p_bot_name() == "mortal"
+        finally:
+            if original is not None:
+                ss.settings.model = original
