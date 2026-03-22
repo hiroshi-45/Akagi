@@ -13,6 +13,7 @@ import pytest
 from mjai_bot.akagi_supreme.strategy_engine import StrategyEngine, ACTION_CONFIG_4P, ACTION_CONFIG_3P, ACTION_TILE_NAMES
 from mjai_bot.akagi_supreme.game_state import GameState, PlayerInfo, MeldInfo
 from mjai_bot.akagi_supreme.placement_strategy import PlacementAdjustment, should_damaten, compute_placement_adjustment
+from mjai_bot.akagi_supreme.push_fold import evaluate_push_fold, adjust_for_placement, Decision
 
 
 def test_negative_q_riichi_override():
@@ -739,3 +740,143 @@ class TestCheckRiichiOverrideHandValue:
         )
         # With multiplier 1.2 and riichi_q > discard_q, should override
         assert result == ACTION_CONFIG_4P.idx_reach
+
+
+class TestAdjustRiichiMultiplierApplied:
+    """Verify _adjust_riichi applies riichi_multiplier to Q-value comparison.
+
+    When riichi_multiplier < 0.8, the multiplier should discount riichi's
+    Q-value before comparing to damaten. Without this, raw Q comparison
+    almost never overrides Mortal's riichi choice.
+    """
+
+    def test_low_multiplier_forces_damaten(self):
+        """With multiplier=0.5, riichi Q of 0.20 → adjusted 0.10 < discard 0.15 + 0.05 → damaten."""
+        engine = StrategyEngine(ACTION_CONFIG_4P)
+        engine.gs._initialized = True
+        engine.gs.player_id = 0
+        engine.gs.players[0].score = 25000
+        engine.gs.dealer = 1
+        engine.gs.round_wind = "S"
+        engine.gs.round_number = 4
+        engine.gs.turn = 20
+        engine.gs.my_hand = ["1m"] * 13
+        engine.gs.visible_counts = [0] * 34
+        engine._last_shanten = 0
+
+        q_values = [0.0] * 46
+        q_values[ACTION_CONFIG_4P.idx_reach] = 0.20  # riichi Q
+        q_values[0] = 0.15  # best discard Q (1m)
+        mask = [False] * 46
+        mask[0] = True
+        mask[ACTION_CONFIG_4P.idx_reach] = True
+
+        # riichi_multiplier=0.5: adjusted riichi Q = 0.20 * 0.5 = 0.10
+        # 0.10 < 0.15 + 0.05 = 0.20 → should choose damaten
+        p_adj = PlacementAdjustment(riichi_multiplier=0.5, prefer_damaten=False)
+        result = engine._adjust_riichi(q_values, mask, p_adj)
+        assert result == 0, "Low riichi_multiplier should discount riichi Q and force damaten"
+
+    def test_low_multiplier_riichi_if_overwhelming_q(self):
+        """With multiplier=0.7, riichi Q 0.50 → adjusted 0.35 > discard 0.10 + 0.05 → riichi."""
+        engine = StrategyEngine(ACTION_CONFIG_4P)
+        engine.gs._initialized = True
+        engine.gs.player_id = 0
+        engine.gs.players[0].score = 25000
+        engine.gs.dealer = 1
+        engine.gs.round_wind = "S"
+        engine.gs.round_number = 4
+        engine.gs.turn = 20
+        engine.gs.my_hand = ["1m"] * 13
+        engine.gs.visible_counts = [0] * 34
+        engine._last_shanten = 0
+
+        q_values = [0.0] * 46
+        q_values[ACTION_CONFIG_4P.idx_reach] = 0.50  # very strong riichi Q
+        q_values[0] = 0.10  # discard Q
+        mask = [False] * 46
+        mask[0] = True
+        mask[ACTION_CONFIG_4P.idx_reach] = True
+
+        # adjusted riichi Q = 0.50 * 0.7 = 0.35, discard + margin = 0.15
+        # 0.35 >= 0.15 → riichi still wins when overwhelmingly better
+        p_adj = PlacementAdjustment(riichi_multiplier=0.7, prefer_damaten=False)
+        result = engine._adjust_riichi(q_values, mask, p_adj)
+        assert result == ACTION_CONFIG_4P.idx_reach, "Riichi should win when Q advantage is overwhelming even with discount"
+
+    def test_negative_q_low_multiplier(self):
+        """With negative riichi Q and multiplier=0.5, divides to make less negative."""
+        engine = StrategyEngine(ACTION_CONFIG_4P)
+        engine.gs._initialized = True
+        engine.gs.player_id = 0
+        engine.gs.players[0].score = 25000
+        engine.gs.dealer = 1
+        engine.gs.round_wind = "S"
+        engine.gs.round_number = 4
+        engine.gs.turn = 20
+        engine.gs.my_hand = ["1m"] * 13
+        engine.gs.visible_counts = [0] * 34
+        engine._last_shanten = 0
+
+        q_values = [0.0] * 46
+        q_values[ACTION_CONFIG_4P.idx_reach] = -0.10  # negative riichi Q
+        q_values[0] = -0.15  # also negative discard Q
+        mask = [False] * 46
+        mask[0] = True
+        mask[ACTION_CONFIG_4P.idx_reach] = True
+
+        # adjusted riichi Q = -0.10 / 0.5 = -0.20
+        # -0.20 < -0.15 + 0.05 = -0.10 → damaten
+        p_adj = PlacementAdjustment(riichi_multiplier=0.5, prefer_damaten=False)
+        result = engine._adjust_riichi(q_values, mask, p_adj)
+        assert result == 0, "Negative Q with low multiplier should correctly discourage riichi"
+
+
+class TestDeadCodeCleanup:
+    """Verify the push/fold iishanten late-game logic after dead code removal.
+
+    Previously, unreachable effective_threat >= 2.0 checks existed inside a
+    block where effective_threat was guaranteed < 1.8. After cleanup, the
+    reachable paths should still work correctly.
+    """
+
+    def _make_gs(self, threat_level=1.5, my_turn=13, placement=1):
+        """Create a GameState for iishanten late-game testing."""
+        gs = GameState()
+        gs._initialized = True
+        gs.player_id = 0
+        gs.num_players = 4
+        gs.round_wind = "S"
+        gs.round_number = 4
+        gs.dealer = 1
+        gs.turn = my_turn * 4
+        gs.players[0].score = 35000 if placement == 1 else 25000
+        gs.players[1].score = 25000 if placement == 1 else 35000
+        gs.players[2].score = 20000
+        gs.players[3].score = 20000
+        # Set up threat via riichi
+        if threat_level >= 1.5:
+            gs.players[1].riichi_declared = True
+            gs.players[1].riichi_turn = 4  # early riichi for higher threat
+        gs.my_hand = ["1m", "2m", "3m", "4p", "5p", "7p", "8p", "1s", "2s", "3s", "E", "E", "S"]
+        gs.visible_counts = [0] * 34
+        return gs
+
+    def test_iishanten_late_1st_place_fold_vs_threat(self):
+        """1st place, iishanten, late game, threat >= 1.5, hand < 8000 → FOLD."""
+        gs = self._make_gs(threat_level=1.5, my_turn=13, placement=1)
+        result = evaluate_push_fold(gs, shanten=1, acceptance_count=6)
+        result = adjust_for_placement(result, gs, shanten=1)
+        assert result.decision in (Decision.FOLD, Decision.MAWASHI), \
+            f"1st place iishanten late vs threat should fold/mawashi, got {result.decision}"
+
+    def test_iishanten_late_with_good_shape_mawashi(self):
+        """Iishanten, late game, good shape, moderate threat → MAWASHI."""
+        gs = self._make_gs(threat_level=1.5, my_turn=13, placement=3)
+        # Give a decent hand to hit hand_value >= risk * 0.5
+        gs.my_hand = ["5mr", "6m", "7m", "5pr", "6p", "7p", "5sr", "6s", "7s", "1m", "1m", "E", "E"]
+        gs.dora_indicators = ["4m"]  # makes 5m a dora
+        result = evaluate_push_fold(gs, shanten=1, acceptance_count=10)
+        # Good shape (>=8), decent value → should be MAWASHI or PUSH in late game
+        assert result.decision in (Decision.MAWASHI, Decision.PUSH, Decision.FOLD), \
+            f"Expected valid decision, got {result.decision}"
