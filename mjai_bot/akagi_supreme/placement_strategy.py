@@ -371,8 +371,12 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
             pass
 
     # === Bad wait shape: riichi adds value via ura dora and intimidation ===
+    # Exception: all-last 1st where riichi deposit (1000pts) threatens our lead.
+    # Top players damaten with bad wait when the lead is within noten penalty
+    # range (~3000pts) — losing 1000 to riichi narrows the margin dangerously.
     if bad_wait and hand_value < 8000:
-        if not (gs.is_all_last and gs.my_placement == 1 and gs.diff_to_below <= 1000):
+        if not (gs.is_all_last and gs.my_placement == 1
+                and gs.diff_to_below <= abs(gs.noten_penalty_effect())):
             return False
 
     # === All-last 1st place ===

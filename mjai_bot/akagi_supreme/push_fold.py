@@ -168,6 +168,16 @@ def estimate_risk_of_deal_in(gs: GameState) -> float:
                     # Early riichi = likely good hand (good shape, dora, etc.)
                     base_risk *= 1.3
 
+    # Ippatsu bonus: during ippatsu window, deal-in cost is +1 han.
+    # Top players are extra cautious with their first discard after
+    # someone's riichi — ippatsu ura dora stack can create haneman+.
+    has_ippatsu = any(
+        p.riichi_ippatsu for i, p in enumerate(gs.players)
+        if i != gs.player_id
+    )
+    if has_ippatsu:
+        base_risk *= 1.25  # +1 han ≈ roughly doubles low-han hands
+
     # Open hands with estimated point values
     for i, p in enumerate(gs.players):
         if i == gs.player_id:
@@ -407,6 +417,41 @@ def adjust_for_placement(result: PushFoldResult, gs: GameState) -> PushFoldResul
                     result.confidence,
                     f"all-last 1st place, moderate lead, careful: {result.reason}"
                 )
+            return result
+
+        if placement == 2:
+            # All-last 2nd: priority depends on gap to 3rd.
+            # If 3rd is close, protect 2nd (避ラス > トップ取り).
+            # If 3rd is far, can afford to push for 1st.
+            if diff_below < 4000:
+                # 3rd is close — protect 2nd place.
+                # Deal-in could drop us to 3rd or worse.
+                if result.decision == Decision.PUSH:
+                    return PushFoldResult(
+                        Decision.MAWASHI,
+                        result.confidence,
+                        f"all-last 2nd, 3rd is close ({diff_below}pts gap): {result.reason}"
+                    )
+            return result
+
+        if placement == 3:
+            # All-last 3rd: ラス回避が最優先.
+            # If 4th is close behind, push harder to secure agari and avoid 4th.
+            # If 4th is far behind, can play more carefully.
+            if diff_below < 4000:
+                # 4th is close — need to win to avoid dropping to last.
+                if result.decision == Decision.FOLD:
+                    return PushFoldResult(
+                        Decision.MAWASHI,
+                        result.confidence,
+                        f"all-last 3rd, 4th close ({diff_below}pts), can't fully fold: {result.reason}"
+                    )
+                if result.decision == Decision.MAWASHI:
+                    return PushFoldResult(
+                        Decision.PUSH,
+                        result.confidence,
+                        f"all-last 3rd, 4th close ({diff_below}pts), push to avoid ラス: {result.reason}"
+                    )
             return result
 
         if placement == 4:
