@@ -11,7 +11,7 @@ Tests cover:
 """
 import pytest
 from mjai_bot.akagi_supreme.strategy_engine import StrategyEngine, ACTION_CONFIG_4P, ACTION_CONFIG_3P, ACTION_TILE_NAMES
-from mjai_bot.akagi_supreme.game_state import GameState, PlayerInfo
+from mjai_bot.akagi_supreme.game_state import GameState, PlayerInfo, MeldInfo
 from mjai_bot.akagi_supreme.placement_strategy import PlacementAdjustment, should_damaten, compute_placement_adjustment
 
 
@@ -202,3 +202,125 @@ class TestSetTonpu:
             })
         # Should NOT auto-detect tonpu (removed heuristic)
         assert gs._is_tonpu is False
+
+
+# ============================================================
+# 3P detection persistence tests
+# ============================================================
+
+class TestThreePlayerDetectionPersistence:
+    """Test that 3P detection persists even if a player reaches 0 points."""
+
+    def test_3p_persists_when_player_hits_zero(self):
+        """Once 3P is detected, it should persist even if a player hits 0 points."""
+        gs = GameState()
+        gs.process_event({"type": "start_game", "id": 0})
+        # Round 1: clear 3P detection (4th seat = 0, others > 0)
+        gs.process_event({
+            "type": "start_kyoku", "bakaze": "E", "kyoku": 1,
+            "honba": 0, "kyotaku": 0, "oya": 0,
+            "scores": [35000, 35000, 35000, 0],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "9m", "1p", "2p", "3p", "5p", "6p", "7p", "1s", "2s", "3s", "E", "E"],
+                ["?"] * 13, ["?"] * 13, ["?"] * 13
+            ]
+        })
+        assert gs.num_players == 3
+
+        # Round 2: player 0 has been knocked to 0 points
+        # Without persistence fix, this would fail 3P detection
+        gs.process_event({
+            "type": "start_kyoku", "bakaze": "E", "kyoku": 2,
+            "honba": 0, "kyotaku": 0, "oya": 1,
+            "scores": [0, 50000, 55000, 0],
+            "dora_marker": "2m",
+            "tehais": [
+                ["1m", "9m", "1p", "2p", "3p", "5p", "6p", "7p", "1s", "2s", "3s", "E", "E"],
+                ["?"] * 13, ["?"] * 13, ["?"] * 13
+            ]
+        })
+        assert gs.num_players == 3, \
+            "3P detection should persist even when a player hits 0 points"
+        assert gs.remaining_tiles == 55, \
+            "Wall size should remain 55 for 3P"
+
+    def test_4p_not_falsely_detected_as_3p(self):
+        """A 4P game where player 3 has 0 points should NOT be detected as 3P."""
+        gs = GameState()
+        gs.process_event({"type": "start_game", "id": 0})
+        # All players start with 25000 — clearly 4P
+        gs.process_event({
+            "type": "start_kyoku", "bakaze": "E", "kyoku": 1,
+            "honba": 0, "kyotaku": 0, "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E", "P", "P"],
+                ["?"] * 13, ["?"] * 13, ["?"] * 13
+            ]
+        })
+        assert gs.num_players == 4
+
+        # Later round: player 3 hits 0 points
+        gs.process_event({
+            "type": "start_kyoku", "bakaze": "E", "kyoku": 2,
+            "honba": 0, "kyotaku": 0, "oya": 1,
+            "scores": [30000, 35000, 35000, 0],
+            "dora_marker": "2m",
+            "tehais": [
+                ["1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E", "P", "P"],
+                ["?"] * 13, ["?"] * 13, ["?"] * 13
+            ]
+        })
+        assert gs.num_players == 4, \
+            "4P game should NOT be falsely detected as 3P when player 3 hits 0"
+        assert gs.remaining_tiles == 70
+
+    def test_reset_game_resets_num_players(self):
+        """reset_game() should reset num_players to 4 for clean state."""
+        gs = GameState()
+        gs.process_event({"type": "start_game", "id": 0})
+        gs.process_event({
+            "type": "start_kyoku", "bakaze": "E", "kyoku": 1,
+            "honba": 0, "kyotaku": 0, "oya": 0,
+            "scores": [35000, 35000, 35000, 0],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "9m", "1p", "2p", "3p", "5p", "6p", "7p", "1s", "2s", "3s", "E", "E"],
+                ["?"] * 13, ["?"] * 13, ["?"] * 13
+            ]
+        })
+        assert gs.num_players == 3
+
+        # New game starts — should reset
+        gs.process_event({"type": "end_game"})
+        gs.process_event({"type": "start_game", "id": 0})
+        assert gs.num_players == 4, \
+            "New game should reset num_players to 4"
+
+
+# ============================================================
+# Dealer base value correction test
+# ============================================================
+
+class TestDealerBaseValue:
+    """Verify dealer hand value estimate is reasonable."""
+
+    def test_dealer_weak_hand_not_overestimated(self):
+        """Dealer with no visible yaku should not be estimated at 3900+ points."""
+        from mjai_bot.akagi_supreme.push_fold import estimate_hand_value
+        gs = GameState()
+        gs._initialized = True
+        gs.player_id = 0
+        gs.dealer = 0  # is dealer
+        # Hand with no dora, no yakuhai, random tiles
+        gs.my_hand = ["1m", "3m", "5p", "7p", "9s", "E", "S", "W", "N", "P", "F", "C", "1s"]
+        gs.dora_indicators = []
+        gs.players[0].melds = [MeldInfo("chi", ["2s", "3s", "4s"])]  # open hand, no menzen
+
+        val = estimate_hand_value(gs)
+        # Open hand with no visible yaku: should be at base value (~2900)
+        # Previously was 3900 (overestimate)
+        assert val <= 3500, \
+            f"Dealer weak open hand should not be overestimated, got {val}"

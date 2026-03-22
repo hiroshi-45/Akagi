@@ -465,6 +465,7 @@ class GameState:
         self._initialized = False
         self._is_tonpu = False
         self._round_count = 0
+        self.num_players = 4  # Reset to default; re-detected on first start_kyoku
         self.players = [PlayerInfo() for _ in range(4)]
         self.reset_round()
 
@@ -903,12 +904,18 @@ class GameState:
             self.reset_game()
 
     def _handle_start_kyoku(self, event: dict) -> None:
-        # Detect 3-player mode from scores before reset_round (affects wall size)
+        # Detect 3-player mode from scores before reset_round (affects wall size).
+        # Only detect on the first round of a game (_round_count == 0) because
+        # re-detection is unreliable: a player in 4P could reach exactly 0 points
+        # (scores=[x, y, z, 0] falsely triggers 3P), or a player in 3P could
+        # reach 0 (scores=[0, y, z, 0] misses 3P detection).
+        # Once detected, num_players persists for the entire game.
         scores = event.get("scores", [25000] * 4)
-        if len(scores) == 4 and scores[3] == 0 and all(s > 0 for s in scores[:3]):
-            self.num_players = 3
-        else:
-            self.num_players = 4
+        if self._round_count == 0:
+            if len(scores) == 4 and scores[3] == 0 and all(s > 0 for s in scores[:3]):
+                self.num_players = 3
+            else:
+                self.num_players = 4
         self.reset_round()
         self.round_wind = event.get("bakaze", "E")
         self.round_number = event.get("kyoku", 1)

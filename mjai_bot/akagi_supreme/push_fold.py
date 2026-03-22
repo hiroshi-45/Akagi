@@ -57,9 +57,9 @@ def estimate_hand_value(gs: GameState) -> float:
     - Kyotaku and honba
     """
     if gs.is_dealer_me:
-        base = 3900.0  # dealer 1 han 30 fu
+        base = 2900.0  # strategic floor for dealer (≈2han 30fu dealer ron)
     else:
-        base = 2000.0  # non-dealer 1 han 30 fu
+        base = 2000.0  # strategic floor for non-dealer (≈2han 30fu ron)
 
     han_estimate = 0.0
 
