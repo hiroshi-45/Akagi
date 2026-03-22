@@ -121,6 +121,8 @@ class TestGameState:
         gs.dealer = kwargs.get("dealer", 0)
         gs.round_wind = kwargs.get("round_wind", "E")
         gs.round_number = kwargs.get("round_number", 1)
+        if gs.round_wind in ("S", "W", "N"):
+            gs._is_tonpu = False
         if "scores" in kwargs:
             for i, s in enumerate(kwargs["scores"]):
                 gs.players[i].score = s
@@ -285,6 +287,8 @@ class TestPlacementAdjustment:
         gs.dealer = kwargs.get("dealer", 1)
         gs.round_wind = kwargs.get("round_wind", "S")
         gs.round_number = kwargs.get("round_number", 4)
+        if gs.round_wind in ("S", "W", "N"):
+            gs._is_tonpu = False
         if "scores" in kwargs:
             for i, s in enumerate(kwargs["scores"]):
                 gs.players[i].score = s
@@ -372,6 +376,8 @@ class TestDamaten:
         gs.dealer = kwargs.get("dealer", 1)
         gs.round_wind = kwargs.get("round_wind", "S")
         gs.round_number = kwargs.get("round_number", 4)
+        if gs.round_wind in ("S", "W", "N"):
+            gs._is_tonpu = False
         if "scores" in kwargs:
             for i, s in enumerate(kwargs["scores"]):
                 gs.players[i].score = s
@@ -562,6 +568,8 @@ class TestAllLastPlacementFixes:
         gs.dealer = kwargs.get("dealer", 1)
         gs.round_wind = kwargs.get("round_wind", "S")
         gs.round_number = kwargs.get("round_number", 4)
+        if gs.round_wind in ("S", "W", "N"):
+            gs._is_tonpu = False
         if "scores" in kwargs:
             for i, s in enumerate(kwargs["scores"]):
                 gs.players[i].score = s
@@ -766,6 +774,7 @@ class TestDamatenThinWait:
         gs.player_id = 0
         gs.dealer = 1
         gs.round_wind = "S"
+        gs._is_tonpu = False
         gs.round_number = 4  # all-last
         gs.turn = 32
         gs.my_hand = ["1m"] * 13
@@ -992,6 +1001,7 @@ class TestWaitTileDetails:
         gs.player_id = 0
         gs.dealer = 1
         gs.round_wind = "S"
+        gs._is_tonpu = False
         gs.round_number = 4
         gs.turn = 24
         # Tenpai hand waiting on multiple tiles

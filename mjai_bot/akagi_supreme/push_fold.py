@@ -357,10 +357,19 @@ def adjust_for_placement(result: PushFoldResult, gs: GameState) -> PushFoldResul
     # === All Last (オーラス) special logic ===
     if gs.is_all_last:
         if placement == 1:
-            # Thin lead (< 4000): pushing to win is defensive — noten
-            # penalty (-3000) or opponent tsumo could flip placement.
-            # Top players push tenpai/good iishanten here to secure 1st.
+            # Thin lead where noten penalty could flip placement:
+            # -3000 noten penalty at ryukyoku can drop 1st to 2nd/3rd.
+            # Top players push tenpai/good iishanten to avoid this.
+            noten_danger = diff_below <= abs(gs.noten_penalty_effect())
             if diff_below < 4000:
+                # Upgrade FOLD/MAWASHI to at least MAWASHI when noten
+                # penalty could cost us 1st place. Tenpai is defensive here.
+                if noten_danger and result.decision == Decision.FOLD:
+                    return PushFoldResult(
+                        Decision.MAWASHI,
+                        result.confidence,
+                        f"all-last 1st, noten penalty risk, can't fully fold: {result.reason}"
+                    )
                 return result  # keep original decision, don't weaken to mawashi
             # Comfortable lead: top players fully fold to protect placement.
             # MAWASHI still risks deal-in; FOLD is the safe choice.

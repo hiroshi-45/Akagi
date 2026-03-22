@@ -394,7 +394,11 @@ class GameState:
 
     # Tracking
     _initialized: bool = False
-    _is_tonpu: bool = False  # True for east-only (東風戦)
+    # Default True: assume tonpu until south wind is observed.
+    # In hanchan, E4 will briefly be treated as all-last until S1 starts,
+    # which is acceptable (players do adjust strategy in E4 anyway).
+    # In actual tonpu, this ensures all-last strategy activates correctly.
+    _is_tonpu: bool = True
 
     def reset_round(self) -> None:
         self.turn = 0
@@ -954,12 +958,37 @@ class GameState:
         consumed = event.get("consumed", [])
         pai = event.get("pai", "?")
 
-        meld = MeldInfo(
-            meld_type=kan_type,
-            tiles=consumed + ([pai] if pai != "?" else []),
-            from_player=event.get("target", -1),
-        )
-        self.players[actor].melds.append(meld)
+        if kan_type == "kakan":
+            # Kakan (加槓): upgrade existing pon to kan.
+            # Find the matching pon and update it in-place to avoid
+            # inflating meld count (which affects threat assessment).
+            updated = False
+            kakan_tile = pai if pai != "?" else (consumed[0] if consumed else "?")
+            kakan_base = tile_base(kakan_tile)
+            for m in self.players[actor].melds:
+                if m.meld_type == "pon":
+                    if any(tile_base(t) == kakan_base for t in m.tiles):
+                        m.meld_type = "kakan"
+                        if pai != "?":
+                            m.tiles.append(pai)
+                        updated = True
+                        break
+            if not updated:
+                # Fallback: append as new meld if pon not found
+                meld = MeldInfo(
+                    meld_type=kan_type,
+                    tiles=consumed + ([pai] if pai != "?" else []),
+                    from_player=event.get("target", -1),
+                )
+                self.players[actor].melds.append(meld)
+        else:
+            # Daiminkan or ankan: always a new meld
+            meld = MeldInfo(
+                meld_type=kan_type,
+                tiles=consumed + ([pai] if pai != "?" else []),
+                from_player=event.get("target", -1),
+            )
+            self.players[actor].melds.append(meld)
 
         if actor == self.player_id:
             for t in consumed:

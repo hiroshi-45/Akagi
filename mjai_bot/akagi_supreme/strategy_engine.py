@@ -145,11 +145,18 @@ class StrategyEngine:
 
         ac = self.ac
 
-        # === Hora: respect Mortal's decision ===
-        # If Mortal chose hora, take it. If Mortal chose NOT to take hora
-        # despite it being available, respect that (着順 reasons).
+        # === Hora handling ===
+        # If Mortal chose hora, take it.
         if mortal_action == ac.idx_hora:
             return mortal_action
+
+        # If hora is available but Mortal declined: respect Mortal in most
+        # cases (着順 reasons — e.g. cheap ron that drops placement).
+        # Exception: all-last 4th MUST take any agari. 4th is already the
+        # worst outcome, so any win is an improvement regardless of value.
+        if (ac.idx_hora < len(mask) and mask[ac.idx_hora]
+                and gs.is_all_last and gs.my_placement == 4):
+            return ac.idx_hora
 
         # === Evaluate strategic context ===
         acceptance = self.gs.estimate_acceptance_count()
