@@ -16,7 +16,7 @@ Design principles:
 - PUSH = trust Mortal completely. No safety blending (avoids double-counting).
 - FOLD = full betaori using pure safety logic (genbutsu → suji → kabe).
 - MAWASHI = among safe-enough tiles, pick the one with best Q-value.
-- Force hora in all-last (着順確定 — ending the game locks placement).
+- Hora: trust Mortal's decision (Mortal already encodes 着順 conditions).
 """
 from __future__ import annotations
 

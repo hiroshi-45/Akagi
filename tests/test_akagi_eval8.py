@@ -487,3 +487,124 @@ class TestSafeTilesRemovedNoRegression:
         # Should prefer S, N, or F (all in riichi player's river)
         assert tile_name in ("S", "N", "F"), \
             f"Genbutsu should be a tile from riichi player's river, got {tile_name}"
+
+
+# ======================================================================
+# Evaluation 16: Chase riichi vs placement protection
+# ======================================================================
+
+class TestAllLast3rdThinLeadDamaten:
+    """All-last 3rd, 4th within 1000pts: riichi stick cost threatens ラス.
+
+    Top players NEVER risk ラス for +1 han. When 4th is only 1000pts behind,
+    paying 1000pt for riichi directly ties or flips placement.
+    """
+
+    def test_3rd_4th_very_close_prefer_damaten(self):
+        """All-last 3rd with diff_to_below=1000 should set prefer_damaten=True."""
+        gs = GameState()
+        gs._initialized = True
+        gs.round_wind = "S"
+        gs.round_number = 4
+        gs.player_id = 2
+        gs.dealer = 0
+        # 3rd place: 25000, 4th: 24000 (gap=1000)
+        gs.players[0].score = 35000
+        gs.players[1].score = 30000
+        gs.players[2].score = 25000
+        gs.players[3].score = 24000
+        gs.players[0].is_dealer = True
+
+        adj = compute_placement_adjustment(gs)
+        assert adj.prefer_damaten is True, \
+            "All-last 3rd with 4th only 1000pts behind must prefer damaten to protect against ラス"
+
+    def test_3rd_4th_very_close_damaten_vs_riichi_opponent(self):
+        """All-last 3rd with 4th close, even vs opponent riichi, should damaten."""
+        gs = GameState()
+        gs._initialized = True
+        gs.round_wind = "S"
+        gs.round_number = 4
+        gs.player_id = 2
+        gs.dealer = 0
+        gs.players[0].score = 35000
+        gs.players[1].score = 30000
+        gs.players[2].score = 25000
+        gs.players[3].score = 24000
+        gs.players[0].is_dealer = True
+        # Opponent riichi
+        gs.players[1].riichi_declared = True
+        gs.players[1].riichi_turn = 5
+
+        adj = compute_placement_adjustment(gs)
+        result = should_damaten(gs, adj, hand_value=3000, acceptance_count=6)
+        assert result is True, \
+            "All-last 3rd vs riichi, 4th only 1000pts behind: damaten to avoid ラス (riichi stick = placement flip)"
+
+    def test_3rd_4th_far_chase_riichi_still_works(self):
+        """All-last 3rd with safe lead over 4th should still chase riichi."""
+        gs = GameState()
+        gs._initialized = True
+        gs.round_wind = "S"
+        gs.round_number = 4
+        gs.player_id = 2
+        gs.dealer = 0
+        gs.players[0].score = 35000
+        gs.players[1].score = 30000
+        gs.players[2].score = 25000
+        gs.players[3].score = 17000  # 8000pt gap
+        gs.players[0].is_dealer = True
+        gs.players[1].riichi_declared = True
+        gs.players[1].riichi_turn = 5
+
+        adj = compute_placement_adjustment(gs)
+        # With 8000pt buffer, chase riichi is fine
+        result = should_damaten(gs, adj, hand_value=3000, acceptance_count=6)
+        assert result is False, \
+            "All-last 3rd with safe lead over 4th (8000pts): chase riichi as normal"
+
+
+class TestAllLast2ndThinLeadChaseRiichi:
+    """All-last 2nd, 3rd within 1000pts: riichi stick cost threatens 2nd place."""
+
+    def test_2nd_3rd_very_close_damaten_vs_riichi(self):
+        """All-last 2nd with 3rd only 1000pts behind, vs opponent riichi → damaten."""
+        gs = GameState()
+        gs._initialized = True
+        gs.round_wind = "S"
+        gs.round_number = 4
+        gs.player_id = 1
+        gs.dealer = 0
+        gs.players[0].score = 35000
+        gs.players[1].score = 26000  # 2nd
+        gs.players[2].score = 25000  # 3rd, only 1000 behind
+        gs.players[3].score = 14000
+        gs.players[0].is_dealer = True
+        gs.players[0].riichi_declared = True
+        gs.players[0].riichi_turn = 5
+
+        adj = compute_placement_adjustment(gs)
+        result = should_damaten(gs, adj, hand_value=3000, acceptance_count=6)
+        assert result is True, \
+            "All-last 2nd vs riichi, 3rd only 1000pts behind: damaten to protect placement"
+
+    def test_2nd_3rd_safe_gap_chase_riichi(self):
+        """All-last 2nd with safe lead over 3rd should chase riichi."""
+        gs = GameState()
+        gs._initialized = True
+        gs.round_wind = "S"
+        gs.round_number = 4
+        gs.player_id = 1
+        gs.dealer = 0
+        gs.players[0].score = 35000
+        gs.players[1].score = 30000  # 2nd
+        gs.players[2].score = 20000  # 3rd, 10000 behind
+        gs.players[3].score = 15000
+        gs.players[0].is_dealer = True
+        gs.players[0].riichi_declared = True
+        gs.players[0].riichi_turn = 5
+
+        adj = compute_placement_adjustment(gs)
+        result = should_damaten(gs, adj, hand_value=3000, acceptance_count=6)
+        assert result is False, \
+            "All-last 2nd with safe lead over 3rd (10000pts): chase riichi as normal"

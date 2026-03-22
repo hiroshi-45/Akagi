@@ -164,6 +164,16 @@ def _all_last_strategy(gs: GameState, placement: int,
         han_for_2nd = gs.min_han_for_points(pts_for_2nd, is_tsumo=False)
 
         if diff_below < 4000:
+            # 4th is dangerously close (≤1000): riichi stick (1000pt) directly
+            # risks dropping to 4th (ラス). Top players NEVER risk ラス for +1 han.
+            # prefer_damaten to protect against placement flip.
+            if diff_below <= 1000:
+                return PlacementAdjustment(
+                    riichi_multiplier=0.7,
+                    meld_multiplier=1.1,
+                    prefer_damaten=True,
+                    reason="all-last 3rd, 4th dangerously close (≤1000pts), protect against ラス"
+                )
             if han_for_2nd <= 2:
                 return PlacementAdjustment(
                     riichi_multiplier=1.0,
@@ -353,11 +363,19 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
     # or our hand is too cheap to justify the risk of oi-riichi.
     if gs.num_riichi_opponents >= 1:
         if not (gs.is_all_last and gs.my_placement == 1):
-            # トッププレイヤーは対リーチ時、PUSHと判断された以上は攻めるべき。
-            # 悪形安手でもリーチで威嚇して周りを降ろすのが正しい判断。
-            # ダマテンで構えても悪形では出ない/ツモれないので、リーチの+1翻と
-            # 威嚇効果（他家ベタオリ誘発）の方が期待値が高い。
-            return False  # 追っかけリーチ (oi-riichi) — always riichi vs riichi
+            # Exception: when riichi stick cost (1000pt) directly threatens
+            # placement, top players damaten to protect. Paying 1000pt when
+            # the gap to the player below is ≤1000 can flip placement.
+            # ラス回避 (avoid last) is the #1 priority in competitive mahjong.
+            if (gs.is_all_last and gs.my_placement in (2, 3)
+                    and gs.diff_to_below <= 1000):
+                pass  # Let damaten logic continue; placement protection > chase riichi
+            else:
+                # トッププレイヤーは対リーチ時、PUSHと判断された以上は攻めるべき。
+                # 悪形安手でもリーチで威嚇して周りを降ろすのが正しい判断。
+                # ダマテンで構えても悪形では出ない/ツモれないので、リーチの+1翻と
+                # 威嚇効果（他家ベタオリ誘発）の方が期待値が高い。
+                return False  # 追っかけリーチ (oi-riichi) — always riichi vs riichi
 
     # === Very late game: damaten loses value ===
     # BUGFIX: In very late game (turn 14+), riichi is bad because of the 1000pt risk
