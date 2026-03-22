@@ -168,6 +168,16 @@ def estimate_risk_of_deal_in(gs: GameState) -> float:
                     # Early riichi = likely good hand (good shape, dora, etc.)
                     base_risk *= 1.3
 
+    # Ippatsu bonus: during ippatsu window, deal-in cost is +1 han.
+    # Top players are extra cautious with their first discard after
+    # someone's riichi — ippatsu ura dora stack can create haneman+.
+    has_ippatsu = any(
+        p.riichi_ippatsu for i, p in enumerate(gs.players)
+        if i != gs.player_id
+    )
+    if has_ippatsu:
+        base_risk *= 1.25  # +1 han ≈ roughly doubles low-han hands
+
     # Open hands with estimated point values
     for i, p in enumerate(gs.players):
         if i == gs.player_id:
@@ -212,6 +222,16 @@ def evaluate_push_fold(gs: GameState, shanten: int,
     risk = estimate_risk_of_deal_in(gs)
     threat = gs.max_opponent_threat()
     my_turn = gs.my_turn
+
+    # === Dealer bonus (親の打点1.5倍 + 連荘価値) ===
+    # Dealers get 1.5x payout AND keep dealership on win (renchan).
+    # Top players push significantly harder as dealer because:
+    # 1. Hand value is 1.5x (already reflected in estimate_hand_value)
+    # 2. Winning maintains oya = another chance to score
+    # 3. Not winning passes oya (opportunity cost)
+    # Reduce effective threat when we're dealer to model this aggression.
+    if gs.is_dealer_me:
+        threat *= 0.75  # dealer should push through moderate threats
 
     good_shape = acceptance_count >= 8
     bad_shape = acceptance_count > 0 and acceptance_count <= 4
@@ -397,6 +417,41 @@ def adjust_for_placement(result: PushFoldResult, gs: GameState) -> PushFoldResul
                     result.confidence,
                     f"all-last 1st place, moderate lead, careful: {result.reason}"
                 )
+            return result
+
+        if placement == 2:
+            # All-last 2nd: priority depends on gap to 3rd.
+            # If 3rd is close, protect 2nd (避ラス > トップ取り).
+            # If 3rd is far, can afford to push for 1st.
+            if diff_below < 4000:
+                # 3rd is close — protect 2nd place.
+                # Deal-in could drop us to 3rd or worse.
+                if result.decision == Decision.PUSH:
+                    return PushFoldResult(
+                        Decision.MAWASHI,
+                        result.confidence,
+                        f"all-last 2nd, 3rd is close ({diff_below}pts gap): {result.reason}"
+                    )
+            return result
+
+        if placement == 3:
+            # All-last 3rd: ラス回避が最優先.
+            # If 4th is close behind, push harder to secure agari and avoid 4th.
+            # If 4th is far behind, can play more carefully.
+            if diff_below < 4000:
+                # 4th is close — need to win to avoid dropping to last.
+                if result.decision == Decision.FOLD:
+                    return PushFoldResult(
+                        Decision.MAWASHI,
+                        result.confidence,
+                        f"all-last 3rd, 4th close ({diff_below}pts), can't fully fold: {result.reason}"
+                    )
+                if result.decision == Decision.MAWASHI:
+                    return PushFoldResult(
+                        Decision.PUSH,
+                        result.confidence,
+                        f"all-last 3rd, 4th close ({diff_below}pts), push to avoid ラス: {result.reason}"
+                    )
             return result
 
         if placement == 4:

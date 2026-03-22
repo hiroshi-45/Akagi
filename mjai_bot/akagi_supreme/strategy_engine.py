@@ -16,7 +16,7 @@ Design principles:
 - PUSH = trust Mortal completely. No safety blending (avoids double-counting).
 - FOLD = full betaori using pure safety logic (genbutsu → suji → kabe).
 - MAWASHI = among safe-enough tiles, pick the one with best Q-value.
-- Never force hora when Mortal chose otherwise (着順 reasons).
+- Force hora in all-last (着順確定 — ending the game locks placement).
 """
 from __future__ import annotations
 
@@ -157,12 +157,14 @@ class StrategyEngine:
         # 2. All-last 1st: ending the game preserves 1st place
         # 3. All-last 2nd/3rd: agari can only improve or maintain placement
         if ac.idx_hora < len(mask) and mask[ac.idx_hora] and self.gs.is_all_last:
-            # All-last: any agari ends the game. Top players take it unless
-            # it would actually drop placement (extremely rare edge case
-            # that Mortal handles by declining hora).
-            # For 4th and 1st place, ALWAYS take — there's no downside.
-            if self.gs.my_placement == 4 or self.gs.my_placement == 1:
-                return ac.idx_hora
+            # All-last: any agari ends the game and locks in placement.
+            # Top players take agari in all-last regardless of placement:
+            # - 1st: ends game, secures top
+            # - 2nd: ends game in 2nd (better than risking drop to 3rd/4th)
+            # - 3rd: ends game in 3rd (avoids ラス)
+            # - 4th: any win improves or at least doesn't worsen outcome
+            # Declining hora in all-last is almost never correct.
+            return ac.idx_hora
 
         # === Evaluate strategic context ===
         acceptance = self.gs.estimate_acceptance_count()
@@ -318,22 +320,11 @@ class StrategyEngine:
                     if pon_q < none_q + 0.15:
                         return ac.idx_none
 
-        # === Accept yakuhai pon (役牌ポン) when not folding ===
-        if mortal_action == ac.idx_pon:
-            pon_tile = self._get_last_opponent_discard()
-            if pon_tile and gs.is_my_yakuhai(tile_base(pon_tile)):
-                return mortal_action  # always pon yakuhai
-
-            # Check if pon target is a dora
-            if pon_tile:
-                base = tile_base(pon_tile)
-                if base in gs.doras or pon_tile.endswith("r"):
-                    return mortal_action  # always pon dora
-
         # === Menzen loss evaluation (門前維持価値) ===
+        # MUST be checked BEFORE yakuhai/dora pon fast-path.
         # When hand is closed and near tenpai, melding loses riichi eligibility.
-        # Penalize meld unless the Q-value advantage is strong enough to
-        # compensate for the lost option value of declaring riichi.
+        # Top players would NOT pon even yakuhai if they're already menzen
+        # tenpai with a decent hand — the riichi option is too valuable.
         if not gs.my_melds and ac.idx_none < len(mask) and mask[ac.idx_none]:
             menzen_penalty = self._evaluate_menzen_loss(mortal_action)
             if menzen_penalty > 0.0:
@@ -342,6 +333,19 @@ class StrategyEngine:
                 # Require meld Q-value to exceed pass by the menzen penalty
                 if meld_q < none_q + menzen_penalty:
                     return ac.idx_none
+
+        # === Accept yakuhai pon (役牌ポン) when not folding ===
+        # Only reached if menzen loss check above didn't reject the meld.
+        if mortal_action == ac.idx_pon:
+            pon_tile = self._get_last_opponent_discard()
+            if pon_tile and gs.is_my_yakuhai(tile_base(pon_tile)):
+                return mortal_action  # pon yakuhai (menzen cost already cleared)
+
+            # Check if pon target is a dora
+            if pon_tile:
+                base = tile_base(pon_tile)
+                if base in gs.doras or pon_tile.endswith("r"):
+                    return mortal_action  # pon dora (menzen cost already cleared)
 
         # === In MAWASHI: slight bias against chi ===
         if pf_result.decision == Decision.MAWASHI:
