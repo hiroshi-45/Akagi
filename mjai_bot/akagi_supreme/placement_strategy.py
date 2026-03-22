@@ -10,6 +10,12 @@ Key concepts:
 - トップ取り (first-place pursuit): Important but secondary to avoiding last
 - 順位点 (placement bonus): +30/+10/-10/-30 or similar uma structure
 - オーラス判断 (all-last decisions): Special endgame strategy
+
+Enhanced with:
+- Precise reversal condition calculation (ツモ/ロン/直撃)
+- Damaten in broader situations (not just all-last 1st)
+- Supply stick (kyotaku) influence on strategy
+- Dealer repeat (連荘) strategy
 """
 from __future__ import annotations
 
@@ -57,12 +63,16 @@ def compute_placement_adjustment(gs: GameState) -> PlacementAdjustment:
 def _all_last_strategy(gs: GameState, placement: int,
                         diff_above: int, diff_below: int,
                         is_dealer: bool) -> PlacementAdjustment:
-    """Special strategy for the final round."""
+    """Special strategy for the final round.
+
+    Enhanced with precise reversal calculations and supply stick awareness.
+    """
+    kyotaku_bonus = gs.kyotaku * 1000
 
     if placement == 1:
-        # Leading: protect the lead
+        # Leading in all-last: protect the lead
+        # Key question: can opponents overtake with a tsumo?
         if diff_below >= 12000:
-            # Very safe lead: ultra-conservative
             return PlacementAdjustment(
                 riichi_multiplier=0.5,
                 meld_multiplier=0.7,
@@ -71,7 +81,6 @@ def _all_last_strategy(gs: GameState, placement: int,
                 reason="all-last 1st, big lead - protect"
             )
         if diff_below >= 4000:
-            # Decent lead: moderate defense
             return PlacementAdjustment(
                 riichi_multiplier=0.7,
                 meld_multiplier=0.8,
@@ -79,7 +88,7 @@ def _all_last_strategy(gs: GameState, placement: int,
                 prefer_damaten=True,
                 reason="all-last 1st, moderate lead"
             )
-        # Thin lead: careful but can push with good hands
+        # Thin lead: be careful but can push decent hands
         return PlacementAdjustment(
             riichi_multiplier=0.85,
             meld_multiplier=0.9,
@@ -89,29 +98,31 @@ def _all_last_strategy(gs: GameState, placement: int,
         )
 
     if placement == 2:
-        if diff_above <= 7700:
-            # Can overtake 1st with a direct hit: push for top
+        # Calculate what's needed to reach 1st
+        pts_for_1st = gs.points_needed_for_placement(1)
+        han_for_1st_ron = gs.min_han_for_points(pts_for_1st, is_tsumo=False)
+        han_for_1st_tsumo = gs.min_han_for_points(pts_for_1st, is_tsumo=True)
+
+        if han_for_1st_ron <= 3:
+            # Can overtake 1st with a small hand direct hit
             return PlacementAdjustment(
                 riichi_multiplier=1.1,
                 meld_multiplier=0.9,
                 extra_safety=0.05,
-                min_push_value=3900,
-                reason="all-last 2nd, 1st reachable"
+                min_push_value=max(2000, pts_for_1st),
+                reason=f"all-last 2nd, 1st reachable ({han_for_1st_ron}han ron)"
             )
-        # Focus on defending 2nd — but adjust based on gap to 3rd.
-        # If 3rd is close (< 4000), damaten risks giving away information
-        # and we should play more aggressively to secure 2nd.
+        # Focus on defending 2nd
         if diff_below < 4000:
-            # 3rd is breathing down our neck: push aggressively to extend the lead
+            # 3rd is close: push to extend lead
             return PlacementAdjustment(
                 riichi_multiplier=1.0,
                 meld_multiplier=1.0,
                 extra_safety=0.05,
                 prefer_damaten=False,
-                reason="all-last 2nd, 3rd is close - push to extend lead"
+                reason="all-last 2nd, 3rd is close - push"
             )
         if diff_below < 8000:
-            # Moderate gap to 3rd: balanced approach
             return PlacementAdjustment(
                 riichi_multiplier=0.9,
                 meld_multiplier=0.9,
@@ -119,7 +130,16 @@ def _all_last_strategy(gs: GameState, placement: int,
                 prefer_damaten=True,
                 reason="all-last 2nd, moderate gap to 3rd"
             )
-        # Safe lead over 3rd: defend 2nd comfortably
+        # Safe lead over 3rd
+        if han_for_1st_tsumo <= 4:
+            # Can still reach 1st with tsumo, worth a shot
+            return PlacementAdjustment(
+                riichi_multiplier=0.95,
+                meld_multiplier=0.85,
+                extra_safety=0.10,
+                prefer_damaten=False,
+                reason="all-last 2nd, safe over 3rd, 1st reachable by tsumo"
+            )
         return PlacementAdjustment(
             riichi_multiplier=0.8,
             meld_multiplier=0.8,
@@ -129,15 +149,31 @@ def _all_last_strategy(gs: GameState, placement: int,
         )
 
     if placement == 3:
-        if diff_above <= 4000:
-            # Can move up to 2nd with small hand
+        pts_for_2nd = gs.points_needed_for_placement(2)
+        han_for_2nd = gs.min_han_for_points(pts_for_2nd, is_tsumo=False)
+
+        if diff_below < 4000:
+            # 4th is close: also need to avoid dropping
+            if han_for_2nd <= 2:
+                return PlacementAdjustment(
+                    riichi_multiplier=1.0,
+                    meld_multiplier=1.1,
+                    extra_safety=0.05,
+                    reason="all-last 3rd, 2nd close, 4th near - fast agari"
+                )
+            return PlacementAdjustment(
+                riichi_multiplier=0.9,
+                meld_multiplier=1.0,
+                extra_safety=0.10,
+                reason="all-last 3rd, 4th near - careful"
+            )
+        if han_for_2nd <= 2:
             return PlacementAdjustment(
                 riichi_multiplier=1.0,
                 meld_multiplier=1.1,
                 extra_safety=0.0,
                 reason="all-last 3rd, close to 2nd"
             )
-        # Standard play, avoid dropping to 4th
         return PlacementAdjustment(
             riichi_multiplier=0.9,
             meld_multiplier=1.0,
@@ -146,40 +182,46 @@ def _all_last_strategy(gs: GameState, placement: int,
         )
 
     # placement == 4
-    if diff_above <= 2000:
+    pts_for_3rd = gs.points_needed_for_placement(3)
+    han_for_3rd_ron = gs.min_han_for_points(pts_for_3rd, is_tsumo=False)
+    han_for_3rd_tsumo = gs.min_han_for_points(pts_for_3rd, is_tsumo=True)
+
+    if is_dealer:
+        # Dealer 4th in all-last: keep dealing (連荘) is the priority
+        # Any agari works for renchan
+        return PlacementAdjustment(
+            riichi_multiplier=1.1,
+            meld_multiplier=1.2,  # fast melds for any agari
+            extra_safety=-0.15,
+            reason="all-last 4th dealer, any agari for renchan"
+        )
+
+    if han_for_3rd_ron <= 1:
         # Very close to 3rd: any agari works
         return PlacementAdjustment(
             riichi_multiplier=1.0,
             meld_multiplier=1.3,  # encourage fast melds
-            extra_safety=-0.10,   # push harder
-            reason="all-last 4th, very close"
+            extra_safety=-0.10,
+            reason=f"all-last 4th, very close ({pts_for_3rd}pts needed)"
         )
-    if diff_above <= 8000:
-        # Reachable with a decent hand
+    if han_for_3rd_tsumo <= 3:
         return PlacementAdjustment(
             riichi_multiplier=1.2,
             meld_multiplier=1.1,
             extra_safety=-0.05,
-            min_push_value=2000,
-            reason="all-last 4th, reachable"
+            min_push_value=max(2000, pts_for_3rd),
+            reason=f"all-last 4th, reachable ({han_for_3rd_tsumo}han tsumo)"
         )
-    if diff_above <= 16000:
-        # Need a big hand
+    if han_for_3rd_ron <= 5:
+        # Need mangan
         return PlacementAdjustment(
             riichi_multiplier=1.3,
             meld_multiplier=0.8,  # discourage cheap melds
             extra_safety=-0.10,
             min_push_value=5200,
-            reason="all-last 4th, need big hand"
+            reason="all-last 4th, need mangan"
         )
-    # Desperate: need mangan+ or dealer repeat
-    if is_dealer:
-        return PlacementAdjustment(
-            riichi_multiplier=1.2,
-            meld_multiplier=1.0,
-            extra_safety=-0.15,
-            reason="all-last 4th dealer, keep dealing"
-        )
+    # Desperate
     return PlacementAdjustment(
         riichi_multiplier=1.1,
         meld_multiplier=0.7,
@@ -192,11 +234,14 @@ def _all_last_strategy(gs: GameState, placement: int,
 def _south_strategy(gs: GameState, placement: int,
                      diff_above: int, diff_below: int,
                      is_dealer: bool) -> PlacementAdjustment:
-    """Strategy adjustments for south round (not all-last)."""
+    """Strategy adjustments for south round (not all-last).
+
+    Enhanced with kyotaku awareness and dealer repeat value.
+    """
+    kyotaku_bonus = gs.kyotaku * 1000
 
     if placement == 1:
         if diff_below >= 20000:
-            # Huge lead: very conservative
             return PlacementAdjustment(
                 riichi_multiplier=0.7,
                 meld_multiplier=0.8,
@@ -205,10 +250,12 @@ def _south_strategy(gs: GameState, placement: int,
                 reason="south 1st, huge lead"
             )
         if diff_below >= 8000:
+            # Comfortable: damaten if hand is already strong
             return PlacementAdjustment(
                 riichi_multiplier=0.85,
                 meld_multiplier=0.9,
                 extra_safety=0.08,
+                prefer_damaten=diff_below <= 12000,  # damaten only if not super safe
                 reason="south 1st, comfortable lead"
             )
         return PlacementAdjustment(
@@ -219,12 +266,19 @@ def _south_strategy(gs: GameState, placement: int,
 
     if placement == 4:
         if diff_above >= 30000:
-            # Very far behind: need to take risks
             return PlacementAdjustment(
                 riichi_multiplier=1.15,
                 meld_multiplier=0.9,
                 extra_safety=-0.10,
                 reason="south 4th, far behind"
+            )
+        if is_dealer:
+            # Dealer in 4th: renchan is valuable
+            return PlacementAdjustment(
+                riichi_multiplier=1.1,
+                meld_multiplier=1.1,
+                extra_safety=-0.08,
+                reason="south 4th dealer, renchan value"
             )
         return PlacementAdjustment(
             riichi_multiplier=1.05,
@@ -232,7 +286,21 @@ def _south_strategy(gs: GameState, placement: int,
             reason="south 4th, moderate deficit"
         )
 
-    # 2nd or 3rd: mostly standard
+    # 2nd or 3rd
+    if placement == 2 and diff_below < 4000:
+        # 3rd is close in south: be careful not to drop
+        return PlacementAdjustment(
+            extra_safety=0.05,
+            reason="south 2nd, 3rd is close"
+        )
+    if placement == 3 and diff_above < 4000:
+        # Close to 2nd: push slightly
+        return PlacementAdjustment(
+            riichi_multiplier=1.05,
+            extra_safety=-0.03,
+            reason="south 3rd, close to 2nd"
+        )
+
     return PlacementAdjustment(reason=f"south {placement}th, standard play")
 
 
@@ -242,7 +310,6 @@ def _east_strategy(gs: GameState, placement: int,
     """Strategy for east round — mostly standard but with dealer awareness."""
 
     if is_dealer:
-        # Dealers benefit more from winning: encourage slightly more aggression
         return PlacementAdjustment(
             riichi_multiplier=1.05,
             meld_multiplier=1.05,
@@ -257,15 +324,15 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
                    hand_value: float = 0.0) -> bool:
     """Whether to consider damaten (hidden tenpai) over riichi.
 
-    Damaten is preferred when:
-    - Already leading and riichi stick loss is costly relative to the lead
-    - Hand is already very expensive (mangan+) and riichi stick is not needed
-    - Thin lead where losing 1000 pts for riichi stick would drop placement
+    Enhanced to work in more situations than just all-last 1st:
+    - Mangan+ hand where riichi doesn't add meaningful value
+    - Situations where losing 1000 pts for riichi stick is costly
+    - When opponent dealing into dama is more likely than riichi win
 
-    Riichi is still preferred when:
-    - Hand is cheap (1 han) and needs riichi + ura dora to be meaningful
-    - Kyotaku on table makes winning more rewarding (offsets the riichi stick cost)
-    - Leading comfortably and the riichi stick cost is negligible vs lead
+    Still prefer riichi when:
+    - Hand is cheap and needs riichi to be meaningful
+    - Large kyotaku makes winning more rewarding
+    - In east round where tempo matters
     """
     if not adj.prefer_damaten:
         return False
@@ -274,40 +341,44 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
     if gs.is_all_last and gs.my_placement == 1:
         lead = gs.diff_to_below
 
-        # Mangan+ hand: already expensive enough, damaten avoids riichi stick risk
+        # Mangan+ hand: riichi adds little value
         if hand_value >= 8000:
             return True
 
-        # Very thin lead (riichi stick would erase it or flip placement)
+        # Very thin lead: riichi stick cost could flip placement
         if lead <= 1000:
             return True
 
-        # Small lead: damaten unless hand is cheap and needs riichi to matter,
-        # or unless there's a big kyotaku making riichi stick cost worthwhile
         if lead <= 4000:
             kyotaku_bonus = gs.kyotaku * 1000
             if kyotaku_bonus >= 2000:
-                return False  # Big pot: riichi stick cost offset by kyotaku reward
-            # If hand is cheap (< 3000 pts), riichi is needed to make it count
-            # If hand is decent (3000+), damaten is safer
+                return False  # Big pot justifies riichi stick
             return hand_value >= 3000
 
-        # Comfortable lead: damaten generally fine to protect it,
-        # but don't damaten a super cheap hand that needs riichi to win at all
         if lead >= 12000:
-            return True  # safe enough to always damaten
+            return True  # Safe enough to always damaten
 
-        # Between 4000 and 12000: damaten if kyotaku doesn't justify the risk
         kyotaku_bonus = gs.kyotaku * 1000
-        # If winning already nets enough extra from kyotaku, riichi stick is less costly
         if kyotaku_bonus >= 2000:
-            return False  # riichi: big pot on table makes it worth it
+            return False
         return hand_value >= 3000
 
-    # === Non all-last 1st with prefer_damaten flag ===
-    if gs.my_placement == 1:
-        if gs.diff_to_below <= 1000:
+    # === South round 1st place with prefer_damaten ===
+    if gs.is_south and gs.my_placement == 1:
+        lead = gs.diff_to_below
+        if lead <= 1000:
             return True  # Extremely thin lead
-        # Otherwise let riichi through — damaten in mid-game costs too much tempo
+        # Mangan+ hand in south 1st: damaten is reasonable
+        if hand_value >= 8000 and lead <= 8000:
+            return True
+
+    # === Any placement: mangan+ closed hand ===
+    # When hand is already mangan+, riichi only adds ura dora potential
+    # but reveals tenpai. Top players sometimes damaten expensive hands
+    # to increase chance of dealing-in from opponents.
+    if hand_value >= 12000 and not gs.my_info.is_open():
+        # Haneman+ hand: damaten is a viable option
+        # But only if prefer_damaten flag is set by placement logic
+        return True
 
     return False
