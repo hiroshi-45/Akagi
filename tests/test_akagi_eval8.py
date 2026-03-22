@@ -608,3 +608,134 @@ class TestAllLast2ndThinLeadChaseRiichi:
         result = should_damaten(gs, adj, hand_value=3000, acceptance_count=6)
         assert result is False, \
             "All-last 2nd with safe lead over 3rd (10000pts): chase riichi as normal"
+
+
+# ============================================================
+# Post-riichi safe tiles in MAWASHI mode (Eval 17)
+# ============================================================
+
+class TestPostRiichiSafeInMawashi:
+    """Post-riichi safe tiles should be recognized as safe in MAWASHI danger scoring.
+
+    When a player declares riichi and another player discards a tile that the
+    riichi player doesn't ron, that tile is confirmed 100% safe. Previously,
+    _score_discards_by_safety didn't account for post_riichi_safe, so MAWASHI
+    could choose a moderately dangerous tile over a confirmed-safe one.
+    """
+
+    def test_post_riichi_safe_tile_low_danger(self):
+        """Post-riichi safe tile should have very low danger score."""
+        from mjai_bot.akagi_supreme.strategy_engine import (
+            StrategyEngine, ACTION_CONFIG_4P, DANGER_SAFE, ACTION_TILE_NAMES,
+        )
+        engine = StrategyEngine(ACTION_CONFIG_4P)
+        gs = engine.gs
+        gs._initialized = True
+        gs.player_id = 0
+        gs.dealer = 1
+        gs.round_wind = "E"
+        gs.num_players = 4
+        gs.turn = 20
+        gs.remaining_tiles = 50
+        gs.my_hand = [
+            "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E", "S", "W",
+        ]
+        gs.visible_counts = [0] * 34
+
+        # Player 1 riichi with 9m in their river
+        gs.players[1].riichi_declared = True
+        gs.players[1].riichi_turn = 5
+        gs.players[1].river = [("9m", False)]
+
+        # 5s is post-riichi safe: someone discarded it after riichi, not ronned
+        gs.players[1].post_riichi_safe = {"5s"}
+
+        # Build safety context
+        ctx = engine._build_safety_context()
+        assert ctx is not None
+
+        mask = [True] * 46
+        candidates = engine._score_discards_by_safety(mask, ctx)
+
+        # Find the danger score for 5s (index 22)
+        s5_idx = ACTION_TILE_NAMES.index("5s")
+        s5_candidates = [(idx, d) for idx, d in candidates if idx == s5_idx]
+        assert len(s5_candidates) == 1
+        s5_danger = s5_candidates[0][1]
+
+        # Post-riichi safe tile should be capped at DANGER_SAFE * 0.5
+        assert s5_danger <= DANGER_SAFE * 0.5 + 0.01, \
+            f"Post-riichi safe tile should have very low danger, got {s5_danger}"
+
+    def test_post_riichi_safe_red_tile_normalized(self):
+        """Red tile variant of post-riichi safe should also be recognized."""
+        from mjai_bot.akagi_supreme.strategy_engine import (
+            StrategyEngine, ACTION_CONFIG_4P, DANGER_SAFE, ACTION_TILE_NAMES,
+        )
+        engine = StrategyEngine(ACTION_CONFIG_4P)
+        gs = engine.gs
+        gs._initialized = True
+        gs.player_id = 0
+        gs.dealer = 1
+        gs.round_wind = "E"
+        gs.num_players = 4
+        gs.turn = 20
+        gs.remaining_tiles = 50
+        gs.my_hand = [
+            "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E", "5mr", "W",
+        ]
+        gs.visible_counts = [0] * 34
+
+        gs.players[1].riichi_declared = True
+        gs.players[1].riichi_turn = 5
+        gs.players[1].river = [("9m", False)]
+        # 5m is post-riichi safe (normalized from 5mr discard)
+        gs.players[1].post_riichi_safe = {"5m"}
+
+        ctx = engine._build_safety_context()
+        mask = [True] * 46
+        candidates = engine._score_discards_by_safety(mask, ctx)
+
+        # 5mr (index 34) should be safe since tile_base("5mr") = "5m"
+        mr5_idx = ACTION_TILE_NAMES.index("5mr")
+        mr5_candidates = [(idx, d) for idx, d in candidates if idx == mr5_idx]
+        assert len(mr5_candidates) == 1
+        assert mr5_candidates[0][1] <= DANGER_SAFE * 0.5 + 0.01, \
+            f"Red tile 5mr should be safe when 5m is post-riichi safe"
+
+
+# ============================================================
+# _check_riichi_override passes hand_value (Eval 17)
+# ============================================================
+
+class TestCheckRiichiOverrideHandValue:
+    """_check_riichi_override should pass hand_value to should_damaten."""
+
+    def test_riichi_override_with_hand_value(self):
+        """Verify _check_riichi_override accepts hand_value/acceptance parameters."""
+        from mjai_bot.akagi_supreme.strategy_engine import StrategyEngine, ACTION_CONFIG_4P
+        engine = StrategyEngine(ACTION_CONFIG_4P)
+        engine.gs._initialized = True
+        engine.gs.player_id = 0
+        engine.gs.dealer = 1
+        engine.gs.round_wind = "E"
+        engine.gs.round_number = 1
+        engine.gs.turn = 20
+        engine.gs.my_hand = ["1m"] * 13
+        engine.gs.visible_counts = [0] * 34
+
+        q_values = [0.0] * 46
+        q_values[ACTION_CONFIG_4P.idx_reach] = 0.5
+        q_values[10] = 0.45  # discard
+
+        mask = [True] * 46
+
+        p_adj = PlacementAdjustment(riichi_multiplier=1.2)
+
+        # Should not raise when hand_value/acceptance are passed
+        result = engine._check_riichi_override(
+            10, q_values, mask, p_adj,
+            hand_value=8000.0, acceptance_count=6
+        )
+        # With multiplier 1.2 and riichi_q > discard_q, should override
+        assert result == ACTION_CONFIG_4P.idx_reach

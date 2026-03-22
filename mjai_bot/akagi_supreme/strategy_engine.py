@@ -273,7 +273,7 @@ class StrategyEngine:
 
         # === Discard decisions ===
         if mortal_action in DISCARD_INDICES:
-            override = self._check_riichi_override(mortal_action, q_values, mask, p_adj)
+            override = self._check_riichi_override(mortal_action, q_values, mask, p_adj, hand_value, acceptance)
             if override is not None:
                 action = override
                 self.last_thought.append("【決断】Mortalは普通の打牌を推奨しましたが、攻撃的にいくべき場面なので強制的にリーチに踏み切ります！")
@@ -298,13 +298,17 @@ class StrategyEngine:
         q_values: List[float],
         mask: List[bool],
         p_adj: PlacementAdjustment,
+        hand_value: float = 0.0,
+        acceptance_count: int = 0,
     ) -> Optional[int]:
         """Override discard with riichi if strategy demands aggression."""
         ac = self.ac
         if ac.idx_reach >= len(mask) or not mask[ac.idx_reach]:
             return None
-            
-        if p_adj.riichi_multiplier >= 1.05 and not should_damaten(self.gs, p_adj):
+
+        if p_adj.riichi_multiplier >= 1.05 and not should_damaten(
+            self.gs, p_adj, hand_value=hand_value, acceptance_count=acceptance_count
+        ):
             riichi_q = q_values[ac.idx_reach]
             discard_q = q_values[mortal_action]
             # If riichi is close and multiplier boosts it past discard, override
@@ -782,13 +786,33 @@ class StrategyEngine:
         """Score all available discards by danger level.
 
         Returns list of (action_index, danger_score).
+        Post-riichi safe tiles (tiles others discarded after riichi without
+        being ronned) are overridden to danger=0 since they are confirmed
+        safe against the riichi player.
         """
+        gs = self.gs
         candidates = []
         for idx in DISCARD_INDICES:
             if idx >= len(mask) or not mask[idx]:
                 continue
             tile_name = ACTION_TILE_NAMES[idx]
             danger = aggregate_danger(tile_name, ctx)
+
+            # Override danger for post-riichi safe tiles.
+            # These tiles were discarded by other players after a riichi
+            # declaration and not ronned — confirmed 100% safe against
+            # that riichi player.  The safety module doesn't know about
+            # post_riichi_safe, so we apply the override here.
+            if danger > 0:
+                lookup = tile_base(tile_name)
+                for i, p in enumerate(gs.players):
+                    if i == gs.player_id:
+                        continue
+                    if p.riichi_declared and lookup in p.post_riichi_safe:
+                        # Safe against this riichi player — cap danger
+                        danger = min(danger, DANGER_SAFE * 0.5)
+                        break
+
             candidates.append((idx, danger))
         return candidates
 
