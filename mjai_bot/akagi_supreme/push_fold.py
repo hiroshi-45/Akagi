@@ -293,8 +293,11 @@ def evaluate_push_fold(gs: GameState, shanten: int,
                 Decision.MAWASHI, 0.75,
                 "opponent ippatsu turn, iishanten but cheap bad-shape - mawashi"
             )
+    else:
+        hand_value = None  # will be computed later
 
-    hand_value = estimate_hand_value(gs)
+    if hand_value is None:
+        hand_value = estimate_hand_value(gs)
     risk = estimate_risk_of_deal_in(gs)
     threat = gs.max_opponent_threat()
     my_turn = gs.my_turn

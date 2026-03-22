@@ -179,32 +179,41 @@ def suji_safe(tile: Tile, opp_all_tiles: List[Tile], seq_conf: float = 1.0) -> b
     s, r, _ = parse_tile(tile)
     if r is None:
         return False
-        
+    
     cut_ranks = set()
     for d in opp_all_tiles:
         sd, rd, _ = parse_tile(d)
         if sd == s and rd is not None:
             cut_ranks.add(rd)
-            
+    
     # 正しいスジの定義
-    # 1安全 <- 4切り
-    # 2安全 <- 5切り
-    # 3安全 <- 6切り
-    # 4安全 <- 1と7両方切り (中スジ)
-    # 5安全 <- 2と8両方切り
-    # 6安全 <- 3と9両方切り
-    # 7安全 <- 4切り
-    # 8安全 <- 5切り
-    # 9安全 <- 6切り
-    if r == 1: return 4 in cut_ranks
-    if r == 2: return 5 in cut_ranks
-    if r == 3: return 6 in cut_ranks
-    if r == 4: return (1 in cut_ranks and 7 in cut_ranks)
-    if r == 5: return (2 in cut_ranks and 8 in cut_ranks)
-    if r == 6: return (3 in cut_ranks and 9 in cut_ranks)
-    if r == 7: return 4 in cut_ranks
-    if r == 8: return 5 in cut_ranks
-    if r == 9: return 6 in cut_ranks
+    # 1安全 <-> 4切り
+    # 2安全 <-> 5切り
+    # 3安全 <-> 6切り
+    # 4安全 <-> 1と7両方切り (中スジ)
+    # 5安全 <-> 2と8両方切り
+    # 6安全 <-> 3と9両方切り
+    # 7安全 <-> 4切り
+    # 8安全 <-> 5切り
+    # 9安全 <-> 6切り
+    if r == 1:
+        return 4 in cut_ranks
+    if r == 2:
+        return 5 in cut_ranks
+    if r == 3:
+        return 6 in cut_ranks
+    if r == 4:
+        return (1 in cut_ranks and 7 in cut_ranks)
+    if r == 5:
+        return (2 in cut_ranks and 8 in cut_ranks)
+    if r == 6:
+        return (3 in cut_ranks and 9 in cut_ranks)
+    if r == 7:
+        return 4 in cut_ranks
+    if r == 8:
+        return 5 in cut_ranks
+    if r == 9:
+        return 6 in cut_ranks
     return False
 
 def urasuji_danger(tile: Tile, opp_hand_cuts: List[Tile]) -> bool:
@@ -260,26 +269,38 @@ def kabe_bonus(tile: Tile, visible: Dict[str, Dict[int, int]], endgame_boost: fl
         return 0.0
     v = visible.get(s, {})
     bonus = 0.0
-    
+
     is_no_chance = False
     is_one_chance = False
-    
+
     # 壁の法則に基づく両面待ちの否定
     if r == 1:
-        if v.get(2, 0) >= 4: is_no_chance = True
-        elif v.get(2, 0) == 3: is_one_chance = True
-        if v.get(3, 0) >= 4: is_no_chance = True
-        elif v.get(3, 0) == 3: is_one_chance = True
+        if v.get(2, 0) >= 4:
+            is_no_chance = True
+        elif v.get(2, 0) == 3:
+            is_one_chance = True
+        if v.get(3, 0) >= 4:
+            is_no_chance = True
+        elif v.get(3, 0) == 3:
+            is_one_chance = True
     elif r == 2:
-        if v.get(3, 0) >= 4: is_no_chance = True
-        elif v.get(3, 0) == 3: is_one_chance = True
-        if v.get(4, 0) >= 4: is_no_chance = True
-        elif v.get(4, 0) == 3: is_one_chance = True
+        if v.get(3, 0) >= 4:
+            is_no_chance = True
+        elif v.get(3, 0) == 3:
+            is_one_chance = True
+        if v.get(4, 0) >= 4:
+            is_no_chance = True
+        elif v.get(4, 0) == 3:
+            is_one_chance = True
     elif r == 3:
-        if v.get(4, 0) >= 4: is_no_chance = True
-        elif v.get(4, 0) == 3: is_one_chance = True
-        if v.get(5, 0) >= 4: is_no_chance = True
-        elif v.get(5, 0) == 3: is_one_chance = True
+        if v.get(4, 0) >= 4:
+            is_no_chance = True
+        elif v.get(4, 0) == 3:
+            is_one_chance = True
+        if v.get(5, 0) >= 4:
+            is_no_chance = True
+        elif v.get(5, 0) == 3:
+            is_one_chance = True
     elif r == 4:
         # 4 can be waited on via 23 (ryanmen), 45 (ryanmen for 3 or 6), or 56 (ryanmen)
         # If 3 is walled, 12-waiting-on-3 pattern is blocked (one side blocked)
@@ -303,10 +324,14 @@ def kabe_bonus(tile: Tile, visible: Dict[str, Dict[int, int]], endgame_boost: fl
         if v.get(7, 0) >= 4:
             is_one_chance = True
     elif r == 7:
-        if v.get(5, 0) >= 4: is_no_chance = True
-        elif v.get(5, 0) == 3: is_one_chance = True
-        if v.get(6, 0) >= 4: is_no_chance = True
-        elif v.get(6, 0) == 3: is_one_chance = True
+        if v.get(5, 0) >= 4:
+            is_no_chance = True
+        elif v.get(5, 0) == 3:
+            is_one_chance = True
+        if v.get(6, 0) >= 4:
+            is_no_chance = True
+        elif v.get(6, 0) == 3:
+            is_one_chance = True
     elif r == 8:
         if v.get(6, 0) >= 4: is_no_chance = True
         elif v.get(6, 0) == 3: is_one_chance = True

@@ -1644,3 +1644,14 @@ class TestThreePlayerZeroScore:
         assert 2 in active
         assert 3 not in active, "Seat 3 should never be active in 3P"
 
+
+class TestYakuhaiKanThreat:
+    """Yakuhai daiminkan should count toward threat level."""
+
+    def test_daiminkan_yakuhai_threat(self):
+        p = PlayerInfo()
+        p.melds.append(MeldInfo(meld_type="daiminkan", tiles=["P", "P", "P", "P"]))
+        threat = p.apparent_threat_level(current_turn=6, round_wind="E", seat_wind="S")
+        # Should count as yakuhai + 1 meld
+        assert threat >= 0.6, f"Daiminkan yakuhai should contribute threat, got {threat}"
+

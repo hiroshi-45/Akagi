@@ -311,7 +311,7 @@ class PlayerInfo:
             yakuhai_count = 0
             dragon_count = 0
             for m in self.melds:
-                if m.meld_type == "pon" and len(m.tiles) > 0:
+                if m.meld_type in ("pon", "daiminkan", "kakan", "ankan") and len(m.tiles) > 0:
                     t = tile_base(m.tiles[0])
                     if t in YAKUHAI_HONORS:  # 白發中
                         yakuhai_count += 1
