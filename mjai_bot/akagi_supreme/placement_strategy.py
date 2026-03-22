@@ -90,7 +90,7 @@ def _all_last_strategy(gs: GameState, placement: int,
 
     if placement == 2:
         if diff_above <= 7700:
-            # Can overtake 1st with a direct hit
+            # Can overtake 1st with a direct hit: push for top
             return PlacementAdjustment(
                 riichi_multiplier=1.1,
                 meld_multiplier=0.9,
@@ -98,13 +98,34 @@ def _all_last_strategy(gs: GameState, placement: int,
                 min_push_value=3900,
                 reason="all-last 2nd, 1st reachable"
             )
-        # Focus on defending 2nd
+        # Focus on defending 2nd — but adjust based on gap to 3rd.
+        # If 3rd is close (< 4000), damaten risks giving away information
+        # and we should play more aggressively to secure 2nd.
+        if diff_below < 4000:
+            # 3rd is breathing down our neck: push aggressively to extend the lead
+            return PlacementAdjustment(
+                riichi_multiplier=1.0,
+                meld_multiplier=1.0,
+                extra_safety=0.05,
+                prefer_damaten=False,
+                reason="all-last 2nd, 3rd is close - push to extend lead"
+            )
+        if diff_below < 8000:
+            # Moderate gap to 3rd: balanced approach
+            return PlacementAdjustment(
+                riichi_multiplier=0.9,
+                meld_multiplier=0.9,
+                extra_safety=0.10,
+                prefer_damaten=True,
+                reason="all-last 2nd, moderate gap to 3rd"
+            )
+        # Safe lead over 3rd: defend 2nd comfortably
         return PlacementAdjustment(
             riichi_multiplier=0.8,
             meld_multiplier=0.8,
             extra_safety=0.15,
             prefer_damaten=True,
-            reason="all-last 2nd, defend position"
+            reason="all-last 2nd, safe lead over 3rd"
         )
 
     if placement == 3:
@@ -232,22 +253,61 @@ def _east_strategy(gs: GameState, placement: int,
     return PlacementAdjustment(reason="east round, standard play")
 
 
-def should_damaten(gs: GameState, adj: PlacementAdjustment) -> bool:
+def should_damaten(gs: GameState, adj: PlacementAdjustment,
+                   hand_value: float = 0.0) -> bool:
     """Whether to consider damaten (hidden tenpai) over riichi.
 
     Damaten is preferred when:
-    - Already leading and want to avoid giving 1000 points
-    - Ippatsu/ura risk is not worth the riichi stick
-    - Hand is already expensive enough without riichi
+    - Already leading and riichi stick loss is costly relative to the lead
+    - Hand is already very expensive (mangan+) and riichi stick is not needed
+    - Thin lead where losing 1000 pts for riichi stick would drop placement
+
+    Riichi is still preferred when:
+    - Hand is cheap (1 han) and needs riichi + ura dora to be meaningful
+    - Kyotaku on table makes winning more rewarding (offsets the riichi stick cost)
+    - Leading comfortably and the riichi stick cost is negligible vs lead
     """
     if not adj.prefer_damaten:
         return False
 
-    # Damaten if leading by enough that riichi risk isn't worth it
-    if gs.my_placement == 1 and gs.diff_to_below <= 1000:
-        return True  # Very thin lead: damaten to avoid losing it
-
+    # === All-last 1st place ===
     if gs.is_all_last and gs.my_placement == 1:
-        return True  # All last as leader: damaten is almost always better
+        lead = gs.diff_to_below
+
+        # Mangan+ hand: already expensive enough, damaten avoids riichi stick risk
+        if hand_value >= 8000:
+            return True
+
+        # Very thin lead (riichi stick would erase it or flip placement)
+        if lead <= 1000:
+            return True
+
+        # Small lead: damaten unless hand is cheap and needs riichi to matter,
+        # or unless there's a big kyotaku making riichi stick cost worthwhile
+        if lead <= 4000:
+            kyotaku_bonus = gs.kyotaku * 1000
+            if kyotaku_bonus >= 2000:
+                return False  # Big pot: riichi stick cost offset by kyotaku reward
+            # If hand is cheap (< 3000 pts), riichi is needed to make it count
+            # If hand is decent (3000+), damaten is safer
+            return hand_value >= 3000
+
+        # Comfortable lead: damaten generally fine to protect it,
+        # but don't damaten a super cheap hand that needs riichi to win at all
+        if lead >= 12000:
+            return True  # safe enough to always damaten
+
+        # Between 4000 and 12000: damaten if kyotaku doesn't justify the risk
+        kyotaku_bonus = gs.kyotaku * 1000
+        # If winning already nets enough extra from kyotaku, riichi stick is less costly
+        if kyotaku_bonus >= 2000:
+            return False  # riichi: big pot on table makes it worth it
+        return hand_value >= 3000
+
+    # === Non all-last 1st with prefer_damaten flag ===
+    if gs.my_placement == 1:
+        if gs.diff_to_below <= 1000:
+            return True  # Extremely thin lead
+        # Otherwise let riichi through — damaten in mid-game costs too much tempo
 
     return False

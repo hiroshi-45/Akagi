@@ -168,13 +168,14 @@ def expand_dora_numbers(dora_inds: Optional[List[Tile]]) -> Dict[str, Set[int]]:
 # スジ/裏筋/壁/赤ドラ/跨ぎドラ
 # ------------------------------
 def suji_partner_ranks(r: int) -> Set[int]:
-    mp = {1: 4, 2: 5, 3: 6, 4: 7, 5: (2, 8), 6: 3, 7: 4, 8: 5, 9: 6}
+    # 捨て牌ランク r に対して「スジ安全」になるランクの集合を返す。
+    # 両面待ちのペア: (1,4), (2,5), (3,6), (4,7), (5,8), (6,9)
+    # 4切り → 1 と 7 が安全、6切り → 3 と 9 が安全
+    mp = {1: (4,), 2: (5,), 3: (6,), 4: (1, 7), 5: (2, 8), 6: (3, 9), 7: (4,), 8: (5,), 9: (6,)}
     v = mp.get(r)
     if v is None:
         return set()
-    if isinstance(v, tuple):
-        return set(v)
-    return {v}
+    return set(v)
 
 def suji_safe(tile: Tile, opp_hand_cuts: List[Tile], seq_conf: float = 1.0) -> bool:
     """
