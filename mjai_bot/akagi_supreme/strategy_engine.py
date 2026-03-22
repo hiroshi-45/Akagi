@@ -26,7 +26,7 @@ from ..strategy.safety import (
     SafetyContext, aggregate_danger, bucketize,
     parse_tile, is_honor, only_tiles, SUITS
 )
-from .game_state import GameState, Tile
+from .game_state import GameState, Tile, tile_base
 from .push_fold import (
     Decision, PushFoldResult, evaluate_push_fold,
     adjust_for_placement, estimate_hand_value, estimate_risk_of_deal_in
@@ -100,6 +100,9 @@ class StrategyEngine:
         # === CRITICAL: Always take winning moves first ===
         # Check mask before checking mortal_action to prevent miss when
         # Mortal returns IDX_NONE but hora is available.
+        # Note: In ranked Majsoul, winning is virtually always correct.
+        # The extremely rare exception (yakuman pursuit) is not worth
+        # the complexity of checking.
         if IDX_HORA < len(mask) and mask[IDX_HORA]:
             return IDX_HORA
 
@@ -107,18 +110,22 @@ class StrategyEngine:
         if mortal_action == IDX_HORA:
             return mortal_action
 
-        # === Allow pass when Mortal says pass ===
-        if mortal_action == IDX_NONE:
-            return mortal_action
-
         # === Evaluate strategic context ===
-        pf_result = evaluate_push_fold(self.gs, self._last_shanten)
+        acceptance = self.gs.estimate_acceptance_count()
+        pf_result = evaluate_push_fold(self.gs, self._last_shanten, acceptance)
         pf_result = adjust_for_placement(pf_result, self.gs)
         p_adj = compute_placement_adjustment(self.gs)
 
+        # === Pass override: check if we should meld when Mortal passes ===
+        if mortal_action == IDX_NONE:
+            override = self._check_pass_override(q_values, mask, p_adj, pf_result)
+            if override is not None:
+                return override
+            return mortal_action
+
         # === Riichi decision ===
         if mortal_action == IDX_REACH:
-            return self._adjust_riichi(q_values, mask, p_adj)
+            return self._adjust_riichi(q_values, mask, p_adj, acceptance)
 
         # === Meld decisions (chi/pon/kan) ===
         if mortal_action in MELD_INDICES:
@@ -130,17 +137,73 @@ class StrategyEngine:
 
         return mortal_action
 
+    def _check_pass_override(
+        self,
+        q_values: List[float],
+        mask: List[bool],
+        p_adj: PlacementAdjustment,
+        pf_result: PushFoldResult,
+    ) -> Optional[int]:
+        """Check if we should override Mortal's pass (IDX_NONE) with a meld.
+
+        This handles cases where placement demands speed (e.g. all-last 4th)
+        but Mortal's NN doesn't weight placement urgency enough.
+
+        Returns the override action index, or None to keep the pass.
+        """
+        gs = self.gs
+
+        # Only override in desperate situations
+        if not gs.is_all_last:
+            return None
+        if gs.my_placement <= 2:
+            return None  # 1st/2nd don't need desperate melds
+
+        # Check if any meld options are available
+        available_melds = []
+        for idx in MELD_INDICES:
+            if idx < len(mask) and mask[idx]:
+                available_melds.append(idx)
+        if not available_melds:
+            return None
+
+        # All-last 4th: strongly consider melding for speed
+        if gs.my_placement == 4:
+            # Check if meld multiplier encourages it
+            if p_adj.meld_multiplier >= 1.1:
+                # Pick the meld with highest Q-value
+                best_meld = max(available_melds, key=lambda idx: q_values[idx])
+                none_q = q_values[IDX_NONE] if IDX_NONE < len(q_values) else 0.0
+                meld_q = q_values[best_meld]
+                # Override if Q-values are close (within 0.15) — Mortal slightly
+                # prefers pass but placement demands speed
+                if meld_q >= none_q - 0.15:
+                    return best_meld
+
+        # All-last 3rd with 4th close: consider melding
+        if gs.my_placement == 3 and gs.diff_to_below < 4000:
+            if p_adj.meld_multiplier >= 1.05:
+                best_meld = max(available_melds, key=lambda idx: q_values[idx])
+                none_q = q_values[IDX_NONE] if IDX_NONE < len(q_values) else 0.0
+                meld_q = q_values[best_meld]
+                if meld_q >= none_q - 0.08:
+                    return best_meld
+
+        return None
+
     def _adjust_riichi(
         self,
         q_values: List[float],
         mask: List[bool],
         p_adj: PlacementAdjustment,
+        acceptance_count: int = 0,
     ) -> int:
         """Decide whether to declare riichi or damaten."""
         hand_value = estimate_hand_value(self.gs)
 
         # Check if damaten is strategically preferred
-        if should_damaten(self.gs, p_adj, hand_value=hand_value):
+        if should_damaten(self.gs, p_adj, hand_value=hand_value,
+                          acceptance_count=acceptance_count):
             best_discard = self._find_best_discard(q_values, mask)
             if best_discard is not None:
                 return best_discard
@@ -152,8 +215,11 @@ class StrategyEngine:
             if best_discard is not None:
                 riichi_q = q_values[IDX_REACH] if IDX_REACH < len(q_values) else float('-inf')
                 discard_q = q_values[best_discard]
-                # Only damaten if the discard Q-value is reasonably close to riichi
-                if discard_q >= riichi_q * 0.90:
+                # Use difference-based comparison (not ratio) to handle negative Q-values
+                q_diff = riichi_q - discard_q
+                # Only riichi if its Q-value clearly exceeds best discard
+                # With riichi_multiplier < 0.8, we need riichi to be clearly better
+                if q_diff < 0.05:
                     return best_discard
 
         return IDX_REACH
@@ -194,8 +260,10 @@ class StrategyEngine:
                     chi_q = q_values[mortal_action]
                     none_q = q_values[IDX_NONE]
                     # Chi needs clear Q-value advantage in cautious mode
-                    adjusted_chi_q = chi_q * p_adj.meld_multiplier
-                    if none_q > adjusted_chi_q:
+                    # Use difference-based comparison for negative Q-value safety
+                    q_diff = chi_q - none_q
+                    threshold = 0.05 if p_adj.meld_multiplier >= 1.0 else 0.10
+                    if q_diff < threshold:
                         return IDX_NONE
 
         # Apply meld multiplier for general discouragement
@@ -204,8 +272,11 @@ class StrategyEngine:
             none_available = IDX_NONE < len(mask) and mask[IDX_NONE]
             if none_available:
                 none_q = q_values[IDX_NONE]
-                adjusted_meld_q = meld_q * p_adj.meld_multiplier
-                if none_q > adjusted_meld_q:
+                # Use difference-based: meld needs to exceed none by enough margin
+                q_diff = meld_q - none_q
+                # Scale threshold by how much we're discouraging melds
+                threshold = 0.05 * (1.0 - p_adj.meld_multiplier) / 0.15
+                if q_diff < threshold:
                     return IDX_NONE
 
         return mortal_action
@@ -218,9 +289,19 @@ class StrategyEngine:
         pf_result: PushFoldResult,
         p_adj: PlacementAdjustment,
     ) -> int:
-        """Adjust tile discard selection with safety consideration."""
+        """Adjust tile discard selection with safety consideration.
+
+        Enhanced with:
+        - Genbutsu (現物) priority in fold mode
+        - Higher safety cap for full fold (up to 1.0)
+        """
         safety_weight = pf_result.safety_weight + p_adj.extra_safety
-        safety_weight = max(0.0, min(0.80, safety_weight))
+
+        # Full fold: allow safety to dominate completely
+        if pf_result.decision == Decision.FOLD:
+            safety_weight = max(0.0, min(1.0, safety_weight))
+        else:
+            safety_weight = max(0.0, min(0.80, safety_weight))
 
         # If no safety concern, trust Mortal completely
         if safety_weight <= 0.03:
@@ -230,6 +311,23 @@ class StrategyEngine:
         ctx = self._build_safety_context()
         if ctx is None:
             return mortal_action
+
+        # === Genbutsu (現物) priority in fold/cautious mode ===
+        # When folding, always prefer genbutsu (tiles in opponents' rivers) first
+        if pf_result.decision in (Decision.FOLD, Decision.CAUTIOUS) and safety_weight >= 0.30:
+            genbutsu_action = self._find_genbutsu_discard(mask)
+            if genbutsu_action is not None:
+                # In full fold with high safety weight, always use genbutsu
+                if pf_result.decision == Decision.FOLD and safety_weight >= 0.50:
+                    return genbutsu_action
+                # In cautious, prefer genbutsu if Mortal's choice isn't much better
+                mortal_q = q_values[mortal_action]
+                genbutsu_q = q_values[genbutsu_action]
+                q_diff = mortal_q - genbutsu_q
+                # Allow up to q_diff threshold based on safety weight
+                threshold = 0.15 * (1.0 - safety_weight)
+                if q_diff < threshold:
+                    return genbutsu_action
 
         # Collect available discard candidates
         available = [idx for idx in DISCARD_INDICES
@@ -285,6 +383,41 @@ class StrategyEngine:
             if q_values[idx] > best_q:
                 best_q = q_values[idx]
                 best_idx = idx
+        return best_idx
+
+    def _find_genbutsu_discard(self, mask: List[bool]) -> Optional[int]:
+        """Find a genbutsu (現物/safe tile) discard from available options.
+
+        Genbutsu = tiles that appear in riichi players' rivers (completely safe).
+        Among multiple genbutsu, prefer the one that's safe against the most opponents.
+        """
+        gs = self.gs
+        # Collect genbutsu sets per riichi player
+        genbutsu_tiles: Dict[str, int] = {}  # tile_name -> count of riichi players it's safe against
+        for i, p in enumerate(gs.players):
+            if i == gs.player_id:
+                continue
+            if not p.riichi_declared:
+                continue
+            for tile, _ in p.river:
+                base = tile_base(tile)
+                genbutsu_tiles[base] = genbutsu_tiles.get(base, 0) + 1
+
+        if not genbutsu_tiles:
+            return None
+
+        # Find available discards that are genbutsu
+        best_idx = None
+        best_safe_count = 0
+        for idx in DISCARD_INDICES:
+            if idx >= len(mask) or not mask[idx]:
+                continue
+            tile_name = ACTION_TILE_NAMES[idx]
+            safe_count = genbutsu_tiles.get(tile_name, 0)
+            if safe_count > best_safe_count:
+                best_safe_count = safe_count
+                best_idx = idx
+
         return best_idx
 
     def _build_safety_context(self) -> Optional[SafetyContext]:
