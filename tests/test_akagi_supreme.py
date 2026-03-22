@@ -121,6 +121,8 @@ class TestGameState:
         gs.dealer = kwargs.get("dealer", 0)
         gs.round_wind = kwargs.get("round_wind", "E")
         gs.round_number = kwargs.get("round_number", 1)
+        if gs.round_wind in ("S", "W", "N"):
+            gs._is_tonpu = False
         if "scores" in kwargs:
             for i, s in enumerate(kwargs["scores"]):
                 gs.players[i].score = s
@@ -285,6 +287,8 @@ class TestPlacementAdjustment:
         gs.dealer = kwargs.get("dealer", 1)
         gs.round_wind = kwargs.get("round_wind", "S")
         gs.round_number = kwargs.get("round_number", 4)
+        if gs.round_wind in ("S", "W", "N"):
+            gs._is_tonpu = False
         if "scores" in kwargs:
             for i, s in enumerate(kwargs["scores"]):
                 gs.players[i].score = s
@@ -372,6 +376,8 @@ class TestDamaten:
         gs.dealer = kwargs.get("dealer", 1)
         gs.round_wind = kwargs.get("round_wind", "S")
         gs.round_number = kwargs.get("round_number", 4)
+        if gs.round_wind in ("S", "W", "N"):
+            gs._is_tonpu = False
         if "scores" in kwargs:
             for i, s in enumerate(kwargs["scores"]):
                 gs.players[i].score = s
@@ -562,6 +568,8 @@ class TestAllLastPlacementFixes:
         gs.dealer = kwargs.get("dealer", 1)
         gs.round_wind = kwargs.get("round_wind", "S")
         gs.round_number = kwargs.get("round_number", 4)
+        if gs.round_wind in ("S", "W", "N"):
+            gs._is_tonpu = False
         if "scores" in kwargs:
             for i, s in enumerate(kwargs["scores"]):
                 gs.players[i].score = s
@@ -575,12 +583,12 @@ class TestAllLastPlacementFixes:
         # Thin lead — should keep PUSH, not downgrade to MAWASHI
         assert adjusted.decision == Decision.PUSH
 
-    def test_all_last_1st_big_lead_mawashi(self):
-        """All-last 1st with big lead: convert to MAWASHI for safety."""
+    def test_all_last_1st_big_lead_fold(self):
+        """All-last 1st with big lead: convert to FOLD for full safety."""
         gs = self._make_gs(scores=[40000, 25000, 20000, 15000])
         original = PushFoldResult(Decision.PUSH, 0.9, "tenpai")
         adjusted = adjust_for_placement(original, gs)
-        assert adjusted.decision == Decision.MAWASHI
+        assert adjusted.decision == Decision.FOLD
 
     def test_all_last_4th_fold_upgraded(self):
         """All-last 4th should upgrade FOLD — nothing to lose."""
@@ -718,6 +726,7 @@ class TestDamaTenpaiRisk:
         # Set up player 2 with tsumogiri streak then tedashi
         gs.players[2]._consecutive_tsumogiri = 4
         gs.players[2]._tedashi_count = 1
+        gs.players[2]._tsumogiri_streak_tedashi = True
 
         risk = estimate_risk_of_deal_in(gs)
         # Should be at least 7700 (mangan-level) due to dama signal
@@ -765,6 +774,7 @@ class TestDamatenThinWait:
         gs.player_id = 0
         gs.dealer = 1
         gs.round_wind = "S"
+        gs._is_tonpu = False
         gs.round_number = 4  # all-last
         gs.turn = 32
         gs.my_hand = ["1m"] * 13
@@ -991,6 +1001,7 @@ class TestWaitTileDetails:
         gs.player_id = 0
         gs.dealer = 1
         gs.round_wind = "S"
+        gs._is_tonpu = False
         gs.round_number = 4
         gs.turn = 24
         # Tenpai hand waiting on multiple tiles

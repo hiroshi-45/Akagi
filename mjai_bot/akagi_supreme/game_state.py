@@ -93,6 +93,7 @@ class PlayerInfo:
     _consecutive_tsumogiri: int = 0
     _last_tedashi_turn: int = 0
     _tedashi_count: int = 0  # total tedashi count this round
+    _tsumogiri_streak_tedashi: bool = False  # True once tedashi follows 3+ tsumogiri
     # Post-riichi genbutsu: tiles discarded by others that this riichi
     # player passed on (didn't ron). Safe to discard against them.
     post_riichi_safe: Set[Tile] = field(default_factory=set)
@@ -238,11 +239,13 @@ class PlayerInfo:
         return _calculate_points(han, fu, self.is_dealer, False)
 
     def tedashi_after_tsumogiri_streak(self) -> bool:
-        """Whether last event was tedashi after a streak of tsumogiri.
+        """Whether a tedashi occurred after a streak of 3+ tsumogiri.
 
         This is a strong tenpai signal used by top players.
+        Once detected, stays True for the rest of the round (damaten signal
+        doesn't disappear just because the player draws again).
         """
-        return self._consecutive_tsumogiri >= 3 and self._tedashi_count > 0
+        return self._tsumogiri_streak_tedashi
 
     def detect_honitsu_from_river(self) -> Optional[str]:
         """Detect honitsu tendency from river discards (works for closed hands too).
@@ -391,7 +394,11 @@ class GameState:
 
     # Tracking
     _initialized: bool = False
-    _is_tonpu: bool = False  # True for east-only (東風戦)
+    # Default True: assume tonpu until south wind is observed.
+    # In hanchan, E4 will briefly be treated as all-last until S1 starts,
+    # which is acceptable (players do adjust strategy in E4 anyway).
+    # In actual tonpu, this ensures all-last strategy activates correctly.
+    _is_tonpu: bool = True
 
     def reset_round(self) -> None:
         self.turn = 0
@@ -413,6 +420,7 @@ class GameState:
             p._consecutive_tsumogiri = 0
             p._last_tedashi_turn = 0
             p._tedashi_count = 0
+            p._tsumogiri_streak_tedashi = False
 
     def reset_game(self) -> None:
         self._initialized = False
@@ -895,6 +903,9 @@ class GameState:
         if tsumogiri:
             player._consecutive_tsumogiri += 1
         else:
+            # Tedashi after 3+ consecutive tsumogiri = strong tenpai signal
+            if player._consecutive_tsumogiri >= 3:
+                player._tsumogiri_streak_tedashi = True
             player._consecutive_tsumogiri = 0
             player._tedashi_count += 1
             player._last_tedashi_turn = self.turn
@@ -947,12 +958,37 @@ class GameState:
         consumed = event.get("consumed", [])
         pai = event.get("pai", "?")
 
-        meld = MeldInfo(
-            meld_type=kan_type,
-            tiles=consumed + ([pai] if pai != "?" else []),
-            from_player=event.get("target", -1),
-        )
-        self.players[actor].melds.append(meld)
+        if kan_type == "kakan":
+            # Kakan (加槓): upgrade existing pon to kan.
+            # Find the matching pon and update it in-place to avoid
+            # inflating meld count (which affects threat assessment).
+            updated = False
+            kakan_tile = pai if pai != "?" else (consumed[0] if consumed else "?")
+            kakan_base = tile_base(kakan_tile)
+            for m in self.players[actor].melds:
+                if m.meld_type == "pon":
+                    if any(tile_base(t) == kakan_base for t in m.tiles):
+                        m.meld_type = "kakan"
+                        if pai != "?":
+                            m.tiles.append(pai)
+                        updated = True
+                        break
+            if not updated:
+                # Fallback: append as new meld if pon not found
+                meld = MeldInfo(
+                    meld_type=kan_type,
+                    tiles=consumed + ([pai] if pai != "?" else []),
+                    from_player=event.get("target", -1),
+                )
+                self.players[actor].melds.append(meld)
+        else:
+            # Daiminkan or ankan: always a new meld
+            meld = MeldInfo(
+                meld_type=kan_type,
+                tiles=consumed + ([pai] if pai != "?" else []),
+                from_player=event.get("target", -1),
+            )
+            self.players[actor].melds.append(meld)
 
         if actor == self.player_id:
             for t in consumed:
