@@ -93,6 +93,9 @@ class PlayerInfo:
     _consecutive_tsumogiri: int = 0
     _last_tedashi_turn: int = 0
     _tedashi_count: int = 0  # total tedashi count this round
+    # Post-riichi genbutsu: tiles discarded by others that this riichi
+    # player passed on (didn't ron). Safe to discard against them.
+    post_riichi_safe: Set[Tile] = field(default_factory=set)
 
     def river_tiles(self) -> List[Tile]:
         return [t for t, _ in self.river]
@@ -381,6 +384,10 @@ class GameState:
     # Tile visibility tracker (34-element counts: how many of each tile seen)
     visible_counts: List[int] = field(default_factory=lambda: [0] * 34)
 
+    # Last discard tracking (for pon target detection)
+    _last_discard_tile: Optional[Tile] = None
+    _last_discard_actor: int = -1
+
     # Tracking
     _initialized: bool = False
     _is_tonpu: bool = False  # True for east-only (東風戦)
@@ -392,6 +399,8 @@ class GameState:
         self.my_tsumo = None
         self.dora_indicators = []
         self.visible_counts = [0] * 34
+        self._last_discard_tile = None
+        self._last_discard_actor = -1
         for p in self.players:
             p.river = []
             p.melds = []
@@ -399,6 +408,7 @@ class GameState:
             p.riichi_turn = -1
             p.riichi_ippatsu = False
             p.safe_tiles_for_me = set()
+            p.post_riichi_safe = set()
             p._consecutive_tsumogiri = 0
             p._last_tedashi_turn = 0
             p._tedashi_count = 0
@@ -789,6 +799,11 @@ class GameState:
         if pai == "?":
             return
 
+        # Track last discard for pon target detection
+        if actor != self.player_id:
+            self._last_discard_tile = pai
+            self._last_discard_actor = actor
+
         player = self.players[actor]
         player.river.append((pai, tsumogiri))
         player.riichi_ippatsu = False  # cleared after discard
@@ -809,6 +824,16 @@ class GameState:
             self._mark_visible(pai)
             # Track genbutsu for me
             player.safe_tiles_for_me.add(pai)
+
+        # Track post-riichi genbutsu: tiles that riichi players passed on.
+        # If player X has riichi and player Y (Y != X) discards a tile,
+        # that tile is safe against X (they chose not to ron).
+        base = tile_base(pai)
+        for i, p in enumerate(self.players):
+            if i == actor:
+                continue  # the discarder, not relevant
+            if p.riichi_declared:
+                p.post_riichi_safe.add(base)
 
     def _handle_meld(self, event: dict, meld_type: str) -> None:
         actor = event.get("actor", -1)
@@ -938,45 +963,49 @@ def _estimate_deficiency(counts: List[int]) -> int:
 
 
 def _count_mentsu_and_partial(counts: List[int]) -> tuple:
-    """Count complete mentsu and partial blocks in hand (greedy).
+    """Count complete mentsu and partial blocks in hand.
+
+    Tries both extraction orders (shuntsu-first and kotsu-first) for
+    number tiles and returns the better result. This avoids the classic
+    greedy pitfall where e.g. 1m1m1m2m3m4m gives 1 mentsu (shuntsu-first)
+    instead of 2 (kotsu-first).
 
     Returns (mentsu_count, partial_count).
     """
-    c = list(counts)  # work on copy
+    r1 = _count_with_order(counts, shuntsu_first=True)
+    r2 = _count_with_order(counts, shuntsu_first=False)
+    # Pick better: more mentsu, tiebreak by more partials
+    if r1[0] > r2[0] or (r1[0] == r2[0] and r1[1] >= r2[1]):
+        return r1
+    return r2
+
+
+def _count_with_order(counts: List[int], shuntsu_first: bool) -> tuple:
+    """Count mentsu and partials with a specific extraction order."""
+    c = list(counts)
     mentsu = 0
     partial = 0
 
-    # Extract complete mentsu first (greedy)
-    # Kotsu (triplets) for honors
+    # Honor triplets always first (no ordering ambiguity)
     for i in range(27, 34):
         while c[i] >= 3:
             c[i] -= 3
             mentsu += 1
 
-    # Shuntsu (sequences) for number tiles
-    for suit_start in (0, 9, 18):
-        for rank in range(7):
-            idx = suit_start + rank
-            while c[idx] >= 1 and c[idx + 1] >= 1 and c[idx + 2] >= 1:
-                c[idx] -= 1
-                c[idx + 1] -= 1
-                c[idx + 2] -= 1
-                mentsu += 1
-
-    # Remaining kotsu for number tiles
-    for i in range(27):
-        while c[i] >= 3:
-            c[i] -= 3
-            mentsu += 1
+    # Number tiles: try specified order
+    if shuntsu_first:
+        mentsu += _extract_shuntsu(c)
+        mentsu += _extract_number_kotsu(c)
+    else:
+        mentsu += _extract_number_kotsu(c)
+        mentsu += _extract_shuntsu(c)
 
     # Count partial blocks (pairs, adjacent pairs for sequences)
-    # Pairs
     for i in range(34):
         if c[i] >= 2:
             c[i] -= 2
             partial += 1
 
-    # Adjacent/skip pairs (partial sequences)
     for suit_start in (0, 9, 18):
         for rank in range(8):
             idx = suit_start + rank
@@ -992,6 +1021,30 @@ def _count_mentsu_and_partial(counts: List[int]) -> tuple:
                 partial += 1
 
     return mentsu, partial
+
+
+def _extract_shuntsu(c: List[int]) -> int:
+    """Extract shuntsu (sequences) from number tiles."""
+    mentsu = 0
+    for suit_start in (0, 9, 18):
+        for rank in range(7):
+            idx = suit_start + rank
+            while c[idx] >= 1 and c[idx + 1] >= 1 and c[idx + 2] >= 1:
+                c[idx] -= 1
+                c[idx + 1] -= 1
+                c[idx + 2] -= 1
+                mentsu += 1
+    return mentsu
+
+
+def _extract_number_kotsu(c: List[int]) -> int:
+    """Extract kotsu (triplets) from number tiles."""
+    mentsu = 0
+    for i in range(27):
+        while c[i] >= 3:
+            c[i] -= 3
+            mentsu += 1
+    return mentsu
 
 
 def _ceil100(n: int) -> int:

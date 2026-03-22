@@ -160,7 +160,7 @@ class StrategyEngine:
 
         if not gs.is_all_last:
             return None
-        if gs.my_placement <= 2:
+        if gs.my_placement <= 1:
             return None
 
         available_melds = [idx for idx in MELD_INDICES
@@ -168,23 +168,35 @@ class StrategyEngine:
         if not available_melds:
             return None
 
-        # All-last 4th: aggressively consider melding
-        if gs.my_placement == 4:
-            if p_adj.meld_multiplier >= 1.0:
-                best_meld = max(available_melds, key=lambda idx: q_values[idx])
-                none_q = q_values[IDX_NONE] if IDX_NONE < len(q_values) else 0.0
-                meld_q = q_values[best_meld]
-                # Override if Q-values are reasonably close
-                if meld_q >= none_q - 0.20:
-                    return best_meld
+        best_meld = max(available_melds, key=lambda idx: q_values[idx])
+        none_q = q_values[IDX_NONE] if IDX_NONE < len(q_values) else 0.0
+        meld_q = q_values[best_meld]
 
-        # All-last 3rd with 4th close
+        # All-last 4th: aggressively consider melding (worst placement,
+        # nothing to lose). Top players take almost any meld here.
+        if gs.my_placement == 4:
+            if meld_q >= none_q - 0.25:
+                return best_meld
+
+        # All-last 3rd with 4th close: need speed to stay safe
         if gs.my_placement == 3 and gs.diff_to_below < 4000:
             if p_adj.meld_multiplier >= 1.0:
-                best_meld = max(available_melds, key=lambda idx: q_values[idx])
-                none_q = q_values[IDX_NONE] if IDX_NONE < len(q_values) else 0.0
-                meld_q = q_values[best_meld]
                 if meld_q >= none_q - 0.10:
+                    return best_meld
+
+        # All-last 3rd trying to climb to 2nd: meld for speed when
+        # 2nd is within reach (e.g. small han gap via direct hit)
+        if gs.my_placement == 3 and gs.diff_to_above <= 8000:
+            pts_for_2nd = gs.points_needed_for_placement(2)
+            han_needed = gs.min_han_for_points(pts_for_2nd, is_tsumo=False)
+            if han_needed <= 3 and p_adj.meld_multiplier >= 1.0:
+                if meld_q >= none_q - 0.10:
+                    return best_meld
+
+        # All-last 2nd trying to climb to 1st via fast agari
+        if gs.my_placement == 2 and gs.diff_to_above <= 4000:
+            if p_adj.meld_multiplier >= 1.0:
+                if meld_q >= none_q - 0.08:
                     return best_meld
 
         return None
@@ -367,8 +379,12 @@ class StrategyEngine:
     def _find_genbutsu_discard(self, mask: List[bool]) -> Optional[int]:
         """Find a genbutsu (現物/safe tile) discard from available options.
 
-        Genbutsu = tiles in riichi players' rivers (completely safe).
-        Priority:
+        Genbutsu sources (in order of reliability):
+        1. Tiles in riichi players' own rivers (completely safe)
+        2. Tiles discarded by others after riichi that weren't ron'd
+           (post_riichi_safe — also completely safe since hand is locked)
+
+        Priority among genbutsu:
         1. Tiles safe against the most riichi players
         2. Among ties, prefer tiles that don't break hand structure
            (isolated tiles > connected tiles)
@@ -380,22 +396,27 @@ class StrategyEngine:
                 continue
             if not p.riichi_declared:
                 continue
+            # Tiles in the riichi player's own river
             for tile, _ in p.river:
                 base = tile_base(tile)
+                genbutsu_tiles[base] = genbutsu_tiles.get(base, 0) + 1
+            # Tiles others discarded after this player's riichi (passed on)
+            for base in p.post_riichi_safe:
                 genbutsu_tiles[base] = genbutsu_tiles.get(base, 0) + 1
 
         if not genbutsu_tiles:
             return None
 
         # Find available discards that are genbutsu
+        # Normalize tile names: "5mr" → "5m" for lookup
         genbutsu_options = []
         for idx in DISCARD_INDICES:
             if idx >= len(mask) or not mask[idx]:
                 continue
             tile_name = ACTION_TILE_NAMES[idx]
-            safe_count = genbutsu_tiles.get(tile_name, 0)
+            lookup_name = tile_base(tile_name)  # normalize red tiles
+            safe_count = genbutsu_tiles.get(lookup_name, 0)
             if safe_count > 0:
-                # Score: safe_count * 100 + isolation_score
                 isolation = self._tile_isolation_score(tile_name)
                 genbutsu_options.append((idx, safe_count, isolation))
 
@@ -455,20 +476,12 @@ class StrategyEngine:
         return candidates
 
     def _get_last_opponent_discard(self) -> Optional[str]:
-        """Get the most recently discarded tile by an opponent."""
-        gs = self.gs
-        latest_turn = -1
-        latest_tile = None
-        for i, p in enumerate(gs.players):
-            if i == gs.player_id:
-                continue
-            if p.river:
-                tile, _ = p.river[-1]
-                # Use river length as proxy for recency
-                if len(p.river) > latest_turn:
-                    latest_turn = len(p.river)
-                    latest_tile = tile
-        return latest_tile
+        """Get the most recently discarded tile by an opponent.
+
+        Uses tracked state instead of river length heuristic, which was
+        incorrect (longest river != most recent discard).
+        """
+        return self.gs._last_discard_tile
 
     def _build_safety_context(self) -> Optional[SafetyContext]:
         """Build a SafetyContext from our GameState for danger evaluation."""
