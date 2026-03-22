@@ -207,6 +207,8 @@ class StrategyEngine:
             return IDX_REACH
 
         # Apply riichi multiplier to Q-value comparison
+        # When placement strategy discourages riichi (multiplier < 0.8),
+        # only riichi if Q-value clearly favors it.
         if p_adj.riichi_multiplier < 0.8:
             best_discard = self._find_best_discard(q_values, mask)
             if best_discard is not None:
@@ -215,6 +217,23 @@ class StrategyEngine:
                 q_diff = riichi_q - discard_q
                 if q_diff < 0.05:
                     return best_discard
+
+        # Apply riichi multiplier to boost riichi when placement demands it.
+        # Handle negative Q-values: multiplying a negative value by >1.0 makes
+        # it MORE negative (worse), which is the opposite of intended boosting.
+        # Fix: divide negative values by the multiplier to "boost" them correctly.
+        if p_adj.riichi_multiplier >= 1.05:
+            best_discard = self._find_best_discard(q_values, mask)
+            if best_discard is not None and IDX_REACH < len(q_values):
+                riichi_q = q_values[IDX_REACH]
+                discard_q = q_values[best_discard]
+                # Adjust riichi Q-value by multiplier (handle negative correctly)
+                adjusted_riichi_q = (
+                    riichi_q * p_adj.riichi_multiplier if riichi_q > 0
+                    else riichi_q / p_adj.riichi_multiplier
+                )
+                if adjusted_riichi_q >= discard_q - 0.05:
+                    return IDX_REACH
 
         return IDX_REACH
 

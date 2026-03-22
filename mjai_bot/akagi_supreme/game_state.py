@@ -405,8 +405,17 @@ class GameState:
 
     def reset_game(self) -> None:
         self._initialized = False
+        self._is_tonpu = False
         self.players = [PlayerInfo() for _ in range(4)]
         self.reset_round()
+
+    def set_tonpu(self, is_tonpu: bool) -> None:
+        """Explicitly set game format (tonpu vs hanchan).
+
+        Should be called when the game format is known from lobby/match info.
+        Without this, the bot defaults to hanchan (safer assumption).
+        """
+        self._is_tonpu = is_tonpu
 
     # === Derived metrics ===
 

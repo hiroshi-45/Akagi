@@ -304,9 +304,15 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
     my_turn = gs.my_turn
     bad_wait = acceptance_count > 0 and acceptance_count <= 4
 
-    # === Very late game: damaten loses value ===
-    if my_turn >= 14 and not (gs.is_all_last and gs.my_placement == 1):
-        return False
+    # === Very late game: damaten preferred (save 1000pt, flexibility) ===
+    # At turn 14+, only 2-3 draws remain. Riichi costs 1000pt with minimal
+    # tsumo chance. Top players prefer damaten to maintain flexibility.
+    # Exceptions:
+    # - All-last 1st: handled by later logic (protect lead vs riichi stick cost)
+    # - All-last 4th: riichi for +1 han; 1000pt cost is irrelevant when already
+    #   last, and damaten's "flexibility" is worthless with so few draws
+    if my_turn >= 14 and not (gs.is_all_last and gs.my_placement in (1, 4)):
+        return True
 
     # === Bad wait shape: riichi adds value via ura dora and intimidation ===
     if bad_wait and hand_value < 8000:
