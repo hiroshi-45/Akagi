@@ -3,19 +3,20 @@
 
 Wraps Mortal's neural network decisions with strategic overlays:
 1. Game state tracking
-2. Push/fold evaluation
+2. Push/fold evaluation (binary: PUSH, MAWASHI, or FOLD)
 3. Placement-aware adjustments
-4. Safety-integrated action reranking
-5. Meld/riichi decision overrides
+4. Meld/riichi decision overrides
+5. Safe tile selection (genbutsu → suji → one-chance)
 
 The engine RESPECTS Mortal's Q-values as the primary signal and only
 adjusts when strategic context clearly demands it.
 
-Design principle: Minimize overrides. Mortal's NN already encodes
-most tactical knowledge. We only intervene for:
-- Placement-driven strategy changes (ラス回避, トップ取り)
-- All-last special logic
-- Clear defensive situations where NN may not weight placement enough
+Design principles:
+- Minimize overrides. Mortal's NN already encodes most tactical knowledge.
+- PUSH = trust Mortal completely. No safety blending (avoids double-counting).
+- FOLD = full betaori using pure safety logic (genbutsu → suji → kabe).
+- MAWASHI = among safe-enough tiles, pick the one with best Q-value.
+- Never force hora when Mortal chose otherwise (着順 reasons).
 """
 from __future__ import annotations
 
@@ -34,6 +35,10 @@ from .push_fold import (
 from .placement_strategy import (
     PlacementAdjustment, compute_placement_adjustment, should_damaten
 )
+
+from akagi.logging_utils import setup_logger
+
+logger = setup_logger("akagi_supreme_strategy")
 
 
 # Action type indices in the 46-action space
@@ -63,13 +68,18 @@ IDX_NONE = 45
 DISCARD_INDICES = set(range(37))  # 0-36 are all tile discards
 MELD_INDICES = {IDX_CHI_LOW, IDX_CHI_MID, IDX_CHI_HIGH, IDX_PON, IDX_KAN}
 
+# Safety thresholds for tile categorization
+DANGER_SAFE = 0.25      # genbutsu-level safe
+DANGER_MODERATE = 0.60  # suji/kabe level
+DANGER_HIGH = 1.0       # dangerous
+
 
 class StrategyEngine:
     """Applies strategic overlays to Mortal's raw action selection."""
 
     def __init__(self):
         self.gs = GameState()
-        self._last_shanten: int = 6  # cached shanten from libriichi
+        self._last_shanten: int = 6
 
     def process_event(self, event: dict) -> None:
         """Update internal game state from MJAI event."""
@@ -88,8 +98,11 @@ class StrategyEngine:
     ) -> int:
         """Adjust Mortal's selected action based on strategic context.
 
-        This is the core method. It takes Mortal's Q-values and selected action,
-        and may override the selection when strategic factors demand it.
+        Binary approach:
+        - PUSH: trust Mortal completely (return mortal_action as-is)
+        - MAWASHI: for discards, pick safest among safe-enough tiles using
+                   Q-value tiebreaking. For non-discards, trust Mortal.
+        - FOLD: full betaori - pick the absolute safest tile.
 
         Returns:
             Adjusted action index.
@@ -97,16 +110,9 @@ class StrategyEngine:
         if not self.gs._initialized:
             return mortal_action
 
-        # === CRITICAL: Always take winning moves first ===
-        # Check mask before checking mortal_action to prevent miss when
-        # Mortal returns IDX_NONE but hora is available.
-        # Note: In ranked Majsoul, winning is virtually always correct.
-        # The extremely rare exception (yakuman pursuit) is not worth
-        # the complexity of checking.
-        if IDX_HORA < len(mask) and mask[IDX_HORA]:
-            return IDX_HORA
-
-        # === Always take winning moves ===
+        # === Hora: respect Mortal's decision ===
+        # If Mortal chose hora, take it. If Mortal chose NOT to take hora
+        # despite it being available, respect that (着順 reasons).
         if mortal_action == IDX_HORA:
             return mortal_action
 
@@ -133,7 +139,7 @@ class StrategyEngine:
 
         # === Discard decisions ===
         if mortal_action in DISCARD_INDICES:
-            return self._adjust_discard(mortal_action, q_values, mask, pf_result, p_adj)
+            return self._adjust_discard(mortal_action, q_values, mask, pf_result)
 
         return mortal_action
 
@@ -146,47 +152,39 @@ class StrategyEngine:
     ) -> Optional[int]:
         """Check if we should override Mortal's pass (IDX_NONE) with a meld.
 
-        This handles cases where placement demands speed (e.g. all-last 4th)
-        but Mortal's NN doesn't weight placement urgency enough.
-
-        Returns the override action index, or None to keep the pass.
+        Only in desperate situations (all-last 4th, etc.) where placement
+        demands speed. Even then, only override when meld Q-values are close
+        to pass Q-values (Mortal almost chose to meld).
         """
         gs = self.gs
 
-        # Only override in desperate situations
         if not gs.is_all_last:
             return None
         if gs.my_placement <= 2:
-            return None  # 1st/2nd don't need desperate melds
+            return None
 
-        # Check if any meld options are available
-        available_melds = []
-        for idx in MELD_INDICES:
-            if idx < len(mask) and mask[idx]:
-                available_melds.append(idx)
+        available_melds = [idx for idx in MELD_INDICES
+                           if idx < len(mask) and mask[idx]]
         if not available_melds:
             return None
 
-        # All-last 4th: strongly consider melding for speed
+        # All-last 4th: aggressively consider melding
         if gs.my_placement == 4:
-            # Check if meld multiplier encourages it
-            if p_adj.meld_multiplier >= 1.1:
-                # Pick the meld with highest Q-value
+            if p_adj.meld_multiplier >= 1.0:
                 best_meld = max(available_melds, key=lambda idx: q_values[idx])
                 none_q = q_values[IDX_NONE] if IDX_NONE < len(q_values) else 0.0
                 meld_q = q_values[best_meld]
-                # Override if Q-values are close (within 0.15) — Mortal slightly
-                # prefers pass but placement demands speed
-                if meld_q >= none_q - 0.15:
+                # Override if Q-values are reasonably close
+                if meld_q >= none_q - 0.20:
                     return best_meld
 
-        # All-last 3rd with 4th close: consider melding
+        # All-last 3rd with 4th close
         if gs.my_placement == 3 and gs.diff_to_below < 4000:
-            if p_adj.meld_multiplier >= 1.05:
+            if p_adj.meld_multiplier >= 1.0:
                 best_meld = max(available_melds, key=lambda idx: q_values[idx])
                 none_q = q_values[IDX_NONE] if IDX_NONE < len(q_values) else 0.0
                 meld_q = q_values[best_meld]
-                if meld_q >= none_q - 0.08:
+                if meld_q >= none_q - 0.10:
                     return best_meld
 
         return None
@@ -201,7 +199,6 @@ class StrategyEngine:
         """Decide whether to declare riichi or damaten."""
         hand_value = estimate_hand_value(self.gs)
 
-        # Check if damaten is strategically preferred
         if should_damaten(self.gs, p_adj, hand_value=hand_value,
                           acceptance_count=acceptance_count):
             best_discard = self._find_best_discard(q_values, mask)
@@ -215,10 +212,7 @@ class StrategyEngine:
             if best_discard is not None:
                 riichi_q = q_values[IDX_REACH] if IDX_REACH < len(q_values) else float('-inf')
                 discard_q = q_values[best_discard]
-                # Use difference-based comparison (not ratio) to handle negative Q-values
                 q_diff = riichi_q - discard_q
-                # Only riichi if its Q-value clearly exceeds best discard
-                # With riichi_multiplier < 0.8, we need riichi to be clearly better
                 if q_diff < 0.05:
                     return best_discard
 
@@ -235,32 +229,46 @@ class StrategyEngine:
         """Decide whether to accept or decline a meld opportunity.
 
         Enhanced with:
-        - Fold mode: skip chi, only allow defensive pon/kan
-        - Post-meld defense consideration (open hand = less safe tiles)
-        - Meld value assessment based on what the meld contributes
+        - Fold mode: skip chi, be cautious with pon
+        - Yakuhai/dora pon awareness: always accept valuable pons
+        - Placement-driven meld encouragement
         """
-        # In full fold mode: skip chi entirely, be cautious with pon
+        gs = self.gs
+
+        # === Always accept yakuhai pon (役牌ポン) ===
+        if mortal_action == IDX_PON:
+            # Check if the pon target is a yakuhai
+            # We infer from Mortal choosing pon — check if it's a yakuhai tile
+            # by looking at what tile was just discarded (most recent in an
+            # opponent's river)
+            pon_tile = self._get_last_opponent_discard()
+            if pon_tile and gs.is_my_yakuhai(tile_base(pon_tile)):
+                return mortal_action  # always pon yakuhai
+
+            # Check if pon target is a dora
+            if pon_tile:
+                base = tile_base(pon_tile)
+                if base in gs.doras or pon_tile.endswith("r"):
+                    return mortal_action  # always pon dora
+
+        # === In FOLD: skip chi entirely, very cautious with pon ===
         if pf_result.decision == Decision.FOLD:
             if mortal_action in {IDX_CHI_LOW, IDX_CHI_MID, IDX_CHI_HIGH}:
                 if IDX_NONE < len(mask) and mask[IDX_NONE]:
-                    return IDX_NONE  # pass on chi while folding
-            # For pon in fold mode: only accept if Mortal strongly prefers it
+                    return IDX_NONE
             if mortal_action == IDX_PON:
                 if IDX_NONE < len(mask) and mask[IDX_NONE]:
                     pon_q = q_values[mortal_action]
                     none_q = q_values[IDX_NONE]
-                    # Need significant Q-value advantage to pon while folding
-                    if pon_q < none_q + 0.1:
+                    if pon_q < none_q + 0.15:
                         return IDX_NONE
 
-        # Cautious mode: slight bias against chi (reduces defense)
-        if pf_result.decision == Decision.CAUTIOUS:
+        # === In MAWASHI: slight bias against chi ===
+        if pf_result.decision == Decision.MAWASHI:
             if mortal_action in {IDX_CHI_LOW, IDX_CHI_MID, IDX_CHI_HIGH}:
                 if IDX_NONE < len(mask) and mask[IDX_NONE]:
                     chi_q = q_values[mortal_action]
                     none_q = q_values[IDX_NONE]
-                    # Chi needs clear Q-value advantage in cautious mode
-                    # Use difference-based comparison for negative Q-value safety
                     q_diff = chi_q - none_q
                     threshold = 0.05 if p_adj.meld_multiplier >= 1.0 else 0.10
                     if q_diff < threshold:
@@ -272,9 +280,7 @@ class StrategyEngine:
             none_available = IDX_NONE < len(mask) and mask[IDX_NONE]
             if none_available:
                 none_q = q_values[IDX_NONE]
-                # Use difference-based: meld needs to exceed none by enough margin
                 q_diff = meld_q - none_q
-                # Scale threshold by how much we're discouraging melds
                 threshold = 0.05 * (1.0 - p_adj.meld_multiplier) / 0.15
                 if q_diff < threshold:
                     return IDX_NONE
@@ -287,86 +293,59 @@ class StrategyEngine:
         q_values: List[float],
         mask: List[bool],
         pf_result: PushFoldResult,
-        p_adj: PlacementAdjustment,
     ) -> int:
-        """Adjust tile discard selection with safety consideration.
+        """Adjust tile discard selection based on push/fold decision.
 
-        Enhanced with:
-        - Genbutsu (現物) priority in fold mode
-        - Higher safety cap for full fold (up to 1.0)
+        Binary approach (no blending):
+        - PUSH: trust Mortal completely (return mortal_action)
+        - MAWASHI: pick safest tile among "safe enough" candidates,
+                   using Q-value for tiebreaking
+        - FOLD: pick the absolute safest tile (full betaori)
         """
-        safety_weight = pf_result.safety_weight + p_adj.extra_safety
-
-        # Full fold: allow safety to dominate completely
-        if pf_result.decision == Decision.FOLD:
-            safety_weight = max(0.0, min(1.0, safety_weight))
-        else:
-            safety_weight = max(0.0, min(0.80, safety_weight))
-
-        # If no safety concern, trust Mortal completely
-        if safety_weight <= 0.03:
+        # PUSH: trust Mortal 100%
+        if pf_result.decision == Decision.PUSH:
             return mortal_action
 
-        # Build safety context for danger evaluation
+        # Build safety context
         ctx = self._build_safety_context()
         if ctx is None:
-            return mortal_action
+            return mortal_action  # can't evaluate safety, trust Mortal
 
-        # === Genbutsu (現物) priority in fold/cautious mode ===
-        # When folding, always prefer genbutsu (tiles in opponents' rivers) first
-        if pf_result.decision in (Decision.FOLD, Decision.CAUTIOUS) and safety_weight >= 0.30:
-            genbutsu_action = self._find_genbutsu_discard(mask)
-            if genbutsu_action is not None:
-                # In full fold with high safety weight, always use genbutsu
-                if pf_result.decision == Decision.FOLD and safety_weight >= 0.50:
-                    return genbutsu_action
-                # In cautious, prefer genbutsu if Mortal's choice isn't much better
-                mortal_q = q_values[mortal_action]
-                genbutsu_q = q_values[genbutsu_action]
-                q_diff = mortal_q - genbutsu_q
-                # Allow up to q_diff threshold based on safety weight
-                threshold = 0.15 * (1.0 - safety_weight)
-                if q_diff < threshold:
-                    return genbutsu_action
-
-        # Collect available discard candidates
-        available = [idx for idx in DISCARD_INDICES
-                     if idx < len(mask) and mask[idx]]
-        if not available:
-            return mortal_action
-
-        # Score each available discard: combined Q-value and safety
-        # Use robust normalization: percentile-based instead of min-max
-        q_vals = [q_values[idx] for idx in available]
-        q_vals_sorted = sorted(q_vals)
-        n = len(q_vals_sorted)
-        if n <= 1:
-            return mortal_action
-
-        # Use 10th and 90th percentile for robust normalization
-        q_low = q_vals_sorted[max(0, n // 10)]
-        q_high = q_vals_sorted[min(n - 1, n - 1 - n // 10)]
-        q_range = max(q_high - q_low, 0.01)
-
-        candidates = []
-        for idx in available:
-            tile_name = ACTION_TILE_NAMES[idx]
-            danger = aggregate_danger(tile_name, ctx)
-            # Normalize danger to 0-1 using context-aware max
-            # Riichi present: max danger ~ 1.8; no riichi: max ~ 1.2
-            max_danger = 1.8 if any(ctx.riichi_flags) else 1.2
-            safety = 1.0 - min(danger / max_danger, 1.0)
-
-            # Robust Q-value normalization
-            q_norm = max(0.0, min(1.0, (q_values[idx] - q_low) / q_range))
-
-            combined = (1.0 - safety_weight) * q_norm + safety_weight * safety
-            candidates.append((idx, combined))
-
+        # Get available discard candidates with danger scores
+        candidates = self._score_discards_by_safety(mask, ctx)
         if not candidates:
             return mortal_action
 
-        candidates.sort(key=lambda x: x[1], reverse=True)
+        # === FOLD: pure betaori — pick the safest tile ===
+        if pf_result.decision == Decision.FOLD:
+            # First try genbutsu
+            genbutsu = self._find_genbutsu_discard(mask)
+            if genbutsu is not None:
+                return genbutsu
+            # Otherwise pick lowest danger tile
+            candidates.sort(key=lambda x: x[1])  # sort by danger ascending
+            return candidates[0][0]
+
+        # === MAWASHI: safe tiles first, Q-value tiebreak ===
+        # 1. Categorize tiles by safety level
+        safe_tiles = [(idx, d) for idx, d in candidates if d <= DANGER_SAFE]
+        moderate_tiles = [(idx, d) for idx, d in candidates if DANGER_SAFE < d <= DANGER_MODERATE]
+        dangerous_tiles = [(idx, d) for idx, d in candidates if d > DANGER_MODERATE]
+
+        # 2. Pick from the safest available category, using Q-value for tiebreak
+        if safe_tiles:
+            # Among safe tiles, pick the one with best Q-value (maintain hand)
+            return max(safe_tiles, key=lambda x: q_values[x[0]])[0]
+
+        if moderate_tiles:
+            # Among moderate tiles, prefer Q-value but lean toward safety
+            # Pick the tile with best Q-value among the safer half
+            moderate_tiles.sort(key=lambda x: x[1])  # sort by danger
+            safer_half = moderate_tiles[:max(1, len(moderate_tiles) // 2 + 1)]
+            return max(safer_half, key=lambda x: q_values[x[0]])[0]
+
+        # Only dangerous tiles available: just pick the least dangerous
+        candidates.sort(key=lambda x: x[1])
         return candidates[0][0]
 
     def _find_best_discard(
@@ -388,12 +367,14 @@ class StrategyEngine:
     def _find_genbutsu_discard(self, mask: List[bool]) -> Optional[int]:
         """Find a genbutsu (現物/safe tile) discard from available options.
 
-        Genbutsu = tiles that appear in riichi players' rivers (completely safe).
-        Among multiple genbutsu, prefer the one that's safe against the most opponents.
+        Genbutsu = tiles in riichi players' rivers (completely safe).
+        Priority:
+        1. Tiles safe against the most riichi players
+        2. Among ties, prefer tiles that don't break hand structure
+           (isolated tiles > connected tiles)
         """
         gs = self.gs
-        # Collect genbutsu sets per riichi player
-        genbutsu_tiles: Dict[str, int] = {}  # tile_name -> count of riichi players it's safe against
+        genbutsu_tiles: Dict[str, int] = {}
         for i, p in enumerate(gs.players):
             if i == gs.player_id:
                 continue
@@ -407,18 +388,87 @@ class StrategyEngine:
             return None
 
         # Find available discards that are genbutsu
-        best_idx = None
-        best_safe_count = 0
+        genbutsu_options = []
         for idx in DISCARD_INDICES:
             if idx >= len(mask) or not mask[idx]:
                 continue
             tile_name = ACTION_TILE_NAMES[idx]
             safe_count = genbutsu_tiles.get(tile_name, 0)
-            if safe_count > best_safe_count:
-                best_safe_count = safe_count
-                best_idx = idx
+            if safe_count > 0:
+                # Score: safe_count * 100 + isolation_score
+                isolation = self._tile_isolation_score(tile_name)
+                genbutsu_options.append((idx, safe_count, isolation))
 
-        return best_idx
+        if not genbutsu_options:
+            return None
+
+        # Pick best: most safe players first, then most isolated
+        genbutsu_options.sort(key=lambda x: (x[1], x[2]), reverse=True)
+        return genbutsu_options[0][0]
+
+    def _tile_isolation_score(self, tile_name: str) -> float:
+        """Score how isolated a tile is in our hand (higher = more isolated = better to discard).
+
+        Tiles that don't contribute to hand progression are better fold discards.
+        """
+        gs = self.gs
+        hand = gs.my_hand
+        if not hand:
+            return 0.0
+
+        # Check how many tiles in hand connect to this tile
+        connections = 0
+        s, r, _ = parse_tile(tile_name)
+        if r is None:
+            # Honor tile: count copies
+            count = sum(1 for t in hand if tile_base(t) == tile_name)
+            return 1.0 if count <= 1 else 0.0  # isolated honor = good to discard
+
+        for t in hand:
+            ts, tr, _ = parse_tile(t)
+            if tr is None:
+                continue
+            if ts == s and abs(tr - r) <= 2:
+                connections += 1
+
+        # More connections = less isolated = worse to discard when folding
+        if connections <= 1:
+            return 1.0  # isolated
+        if connections <= 2:
+            return 0.5
+        return 0.0  # well-connected
+
+    def _score_discards_by_safety(
+        self, mask: List[bool], ctx: SafetyContext
+    ) -> List[Tuple[int, float]]:
+        """Score all available discards by danger level.
+
+        Returns list of (action_index, danger_score).
+        """
+        candidates = []
+        for idx in DISCARD_INDICES:
+            if idx >= len(mask) or not mask[idx]:
+                continue
+            tile_name = ACTION_TILE_NAMES[idx]
+            danger = aggregate_danger(tile_name, ctx)
+            candidates.append((idx, danger))
+        return candidates
+
+    def _get_last_opponent_discard(self) -> Optional[str]:
+        """Get the most recently discarded tile by an opponent."""
+        gs = self.gs
+        latest_turn = -1
+        latest_tile = None
+        for i, p in enumerate(gs.players):
+            if i == gs.player_id:
+                continue
+            if p.river:
+                tile, _ = p.river[-1]
+                # Use river length as proxy for recency
+                if len(p.river) > latest_turn:
+                    latest_turn = len(p.river)
+                    latest_tile = tile
+        return latest_tile
 
     def _build_safety_context(self) -> Optional[SafetyContext]:
         """Build a SafetyContext from our GameState for danger evaluation."""

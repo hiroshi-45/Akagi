@@ -2,20 +2,24 @@
 """Push/fold decision engine.
 
 Determines whether the bot should push (attack), fold (defend),
-or play a balanced strategy based on game context.
+or play mawashi (defend while maintaining hand shape).
 
-Key factors:
+Key design principle: **Binary decision, not blended.**
+Top players think in terms of "push or fold", not "70% push / 30% fold".
+When they push, they trust their tile efficiency fully.
+When they fold, they go full betaori.
+Mawashi is the middle ground: prioritize safety but pick the least
+damaging safe tile for hand progression.
+
+This avoids double-counting safety that's already in Mortal's Q-values.
+
+Factors:
 - Shanten count (distance to tenpai)
 - Opponent threat level (riichi, open hands, behavioral patterns)
 - Hand value potential (dora, yakuhai, suit composition)
 - Placement and point situation
-- Turn number (not just remaining tiles)
+- Turn number
 - Acceptance count (how live is the hand)
-
-Design principle: Trust Mortal's Q-values as the primary signal.
-Only intervene when strategic context clearly demands it.
-Top players almost never fold from tenpai, and push aggressively
-from iishanten with decent hands.
 """
 from __future__ import annotations
 
@@ -30,10 +34,9 @@ from .game_state import (
 
 
 class Decision(Enum):
-    PUSH = 0       # Full attack - trust Mortal's Q-values
-    BALANCED = 1   # Slight safety bias on dangerous tiles
-    CAUTIOUS = 2   # Moderate safety adjustment
-    FOLD = 3       # Maximum defense - prioritize safe tiles
+    PUSH = 0       # Full attack - trust Mortal's action completely
+    MAWASHI = 1    # Defend but maintain hand - safe tiles first, Q-value tiebreak
+    FOLD = 2       # Full betaori - safest tile regardless of hand value
 
 
 @dataclass
@@ -41,8 +44,6 @@ class PushFoldResult:
     decision: Decision
     confidence: float  # 0.0 to 1.0
     reason: str
-    # How much to weight safety vs Q-values (0.0 = pure Q-value, 1.0 = pure safety)
-    safety_weight: float
 
 
 def estimate_hand_value(gs: GameState) -> float:
@@ -88,7 +89,6 @@ def estimate_hand_value(gs: GameState) -> float:
     total_number = suit_counts["m"] + suit_counts["p"] + suit_counts["s"]
     if total_number > 0:
         dominant_suit_count = max(suit_counts["m"], suit_counts["p"], suit_counts["s"])
-        # Honitsu: one suit + honors
         if dominant_suit_count + suit_counts["z"] >= len(hand) - 1:
             han_estimate += 1.5  # likely honitsu (2 han open, 3 closed)
         elif dominant_suit_count + suit_counts["z"] >= len(hand) - 2:
@@ -100,15 +100,14 @@ def estimate_hand_value(gs: GameState) -> float:
         han_estimate += 0.3  # ippatsu/ura dora average contribution
 
     # === Convert han estimate to points ===
-    # Rough point table (30fu baseline)
     if han_estimate >= 11:
-        value = 32000.0 if gs.is_dealer_me else 24000.0  # sanbaiman
+        value = 32000.0 if gs.is_dealer_me else 24000.0
     elif han_estimate >= 8:
-        value = 24000.0 if gs.is_dealer_me else 16000.0  # baiman
+        value = 24000.0 if gs.is_dealer_me else 16000.0
     elif han_estimate >= 6:
-        value = 18000.0 if gs.is_dealer_me else 12000.0  # haneman
+        value = 18000.0 if gs.is_dealer_me else 12000.0
     elif han_estimate >= 5:
-        value = 12000.0 if gs.is_dealer_me else 8000.0  # mangan
+        value = 12000.0 if gs.is_dealer_me else 8000.0
     elif han_estimate >= 4:
         value = 11600.0 if gs.is_dealer_me else 7700.0
     elif han_estimate >= 3:
@@ -130,14 +129,14 @@ def estimate_hand_value(gs: GameState) -> float:
 def estimate_risk_of_deal_in(gs: GameState) -> float:
     """Estimate expected cost if we deal into an opponent.
 
-    Enhanced with turn-aware risk and behavioral threat reading.
+    Enhanced with open hand point estimation.
     """
     base_risk = 5200.0  # average deal-in cost
 
     # Riichi opponents
     n_riichi = gs.num_riichi_opponents
     if n_riichi >= 2:
-        base_risk *= 1.5  # double riichi
+        base_risk *= 1.5
     elif n_riichi == 1:
         for i, p in enumerate(gs.players):
             if i != gs.player_id and p.riichi_declared:
@@ -146,19 +145,17 @@ def estimate_risk_of_deal_in(gs: GameState) -> float:
                 if p.is_dealer:
                     base_risk *= 1.5  # dealer riichi is expensive
 
-    # Open hands with strong threat signals
+    # Open hands with estimated point values
     for i, p in enumerate(gs.players):
         if i == gs.player_id:
             continue
         if p.is_open():
-            threat = p.apparent_threat_level(gs.turn)
-            if threat >= 1.5:
-                # High-threat open hand (multiple yakuhai, honitsu, toitoi)
-                base_risk = max(base_risk, 8000 * (1 + (threat - 1.5) * 0.3))
-            elif threat >= 0.8:
-                base_risk = max(base_risk, 5200 * (1 + threat * 0.3))
+            estimated_pts = p.estimate_open_hand_points(
+                gs.round_wind, gs._opponent_wind(i), gs.doras)
+            if estimated_pts > 0:
+                base_risk = max(base_risk, float(estimated_pts))
 
-    # Dama tenpai signal from tedashi patterns (non-riichi threat)
+    # Dama tenpai signal from tedashi patterns
     for i, p in enumerate(gs.players):
         if i == gs.player_id or p.riichi_declared:
             continue
@@ -175,213 +172,149 @@ def evaluate_push_fold(gs: GameState, shanten: int,
                        acceptance_count: int = 0) -> PushFoldResult:
     """Main push/fold evaluation.
 
-    Design: Top players almost never fold from tenpai or good iishanten.
-    We use turn number as a continuous variable, not just remaining tiles.
-    acceptance_count: number of useful remaining tiles (from estimate_acceptance_count).
+    Returns a binary decision: PUSH, MAWASHI, or FOLD.
+    No safety_weight — the caller uses different tile selection
+    strategies based on the decision.
+
+    Design: Top players think "push or fold", not "partially push".
+    - Tenpai: almost always PUSH
+    - Good iishanten: PUSH unless extreme threat
+    - Bad iishanten / ryanshanten with threat: MAWASHI
+    - Far from tenpai with threat: FOLD
     """
     hand_value = estimate_hand_value(gs)
     risk = estimate_risk_of_deal_in(gs)
     threat = gs.max_opponent_threat()
-    my_turn = gs.my_turn  # per-player turn (0-based)
+    my_turn = gs.my_turn
 
-    # Classify shape quality based on acceptance count
-    # Good shape: >= 8 useful tiles, Bad shape: <= 4
     good_shape = acceptance_count >= 8
     bad_shape = acceptance_count > 0 and acceptance_count <= 4
 
     # === Tenpai: almost always push ===
-    # Top players virtually never fold from tenpai.
-    # But bad-shape tenpai (e.g. penchan 4 tiles) is less pushable than
-    # good-shape tenpai (e.g. ryanmen 8 tiles) in extreme situations.
     if shanten <= 0:
-        if threat >= 3.5 and hand_value < 2000 and my_turn >= 12 and bad_shape:
-            # Extreme case: triple riichi, cheap hand, very late, bad wait
+        # Only exception: extremely cheap bad-shape tenpai vs extreme threat
+        # in very late game. Even then, top players usually push.
+        if threat >= 3.5 and hand_value < 2000 and my_turn >= 14 and bad_shape:
             return PushFoldResult(
-                Decision.BALANCED, 0.6,
-                "tenpai but cheap bad-shape vs extreme threat, very late",
-                safety_weight=0.10
+                Decision.MAWASHI, 0.6,
+                "tenpai but cheap bad-shape vs extreme threat, very late"
             )
-        if threat >= 2.5 and hand_value < 2000 and my_turn >= 14 and bad_shape:
-            # Very late, cheap bad-shape vs strong threats
-            return PushFoldResult(
-                Decision.BALANCED, 0.55,
-                "tenpai cheap bad-shape, very late, strong threats",
-                safety_weight=0.06
-            )
-        # Standard: push from tenpai
         return PushFoldResult(
             Decision.PUSH, 0.95,
-            "tenpai - push",
-            safety_weight=0.0
+            "tenpai - push"
         )
 
-    # === Iishanten (1-away): mostly push, context-dependent ===
+    # === Iishanten (1-away) ===
     if shanten == 1:
         if threat <= 0.5:
-            return PushFoldResult(
-                Decision.PUSH, 0.85,
-                "iishanten, low threat",
-                safety_weight=0.03
-            )
-        # Turn-aware: early iishanten is much more pushable
+            return PushFoldResult(Decision.PUSH, 0.85, "iishanten, low threat")
+
         if my_turn <= 8:
-            # Still early/mid game
-            if hand_value >= risk * 0.4:
+            # Early/mid game iishanten: push unless hand is garbage
+            if hand_value >= risk * 0.3:
                 return PushFoldResult(
                     Decision.PUSH, 0.75,
-                    "iishanten, early-mid game, decent value",
-                    safety_weight=0.05
+                    "iishanten, early-mid game, decent value"
                 )
-            if threat >= 1.5:
-                sw = 0.08 if good_shape else 0.12
+            if threat >= 2.0:
                 return PushFoldResult(
-                    Decision.BALANCED, 0.7,
-                    "iishanten, riichi opponent, early-mid",
-                    safety_weight=sw
+                    Decision.MAWASHI, 0.7,
+                    "iishanten, early-mid, high threat, weak hand"
                 )
             return PushFoldResult(
                 Decision.PUSH, 0.7,
-                "iishanten, early-mid game",
-                safety_weight=0.05
+                "iishanten, early-mid game"
             )
         else:
             # Late game iishanten
-            if hand_value >= risk * 0.6:
-                sw = 0.08 if good_shape else 0.15
+            if hand_value >= risk * 0.5 and good_shape:
                 return PushFoldResult(
-                    Decision.BALANCED, 0.65,
-                    "iishanten, late but valuable hand",
-                    safety_weight=sw
+                    Decision.PUSH, 0.65,
+                    "iishanten, late but valuable good-shape hand"
+                )
+            if hand_value >= risk * 0.5:
+                return PushFoldResult(
+                    Decision.MAWASHI, 0.65,
+                    "iishanten, late, valuable but uncertain shape"
                 )
             if threat >= 2.0:
-                sw = 0.15 if good_shape else 0.22
                 return PushFoldResult(
-                    Decision.BALANCED, 0.6,
-                    "iishanten, late, multiple threats",
-                    safety_weight=sw
-                )
-            if threat >= 1.0:
-                sw = 0.12 if good_shape else 0.18
-                return PushFoldResult(
-                    Decision.BALANCED, 0.65,
-                    "iishanten, late, riichi opponent",
-                    safety_weight=sw
+                    Decision.MAWASHI, 0.6,
+                    "iishanten, late, multiple threats"
                 )
             return PushFoldResult(
-                Decision.BALANCED, 0.65,
-                "iishanten, late game",
-                safety_weight=0.10
+                Decision.MAWASHI, 0.6,
+                "iishanten, late game"
             )
 
-    # === Ryanshanten (2-away): turn-aware ===
+    # === Ryanshanten (2-away) ===
     if shanten == 2:
-        if my_turn <= 6:
-            # Early game: still developing, light defense
-            if threat <= 0.5:
+        if my_turn <= 6 and threat <= 0.5:
+            return PushFoldResult(
+                Decision.PUSH, 0.6,
+                "ryanshanten, early round, low threat"
+            )
+        if my_turn <= 6 and threat < 1.5:
+            return PushFoldResult(
+                Decision.MAWASHI, 0.6,
+                "ryanshanten, early, moderate threat"
+            )
+        if threat >= 2.0:
+            return PushFoldResult(
+                Decision.FOLD, 0.7,
+                "ryanshanten, strong threats"
+            )
+        if threat >= 1.0:
+            if hand_value >= risk * 0.5 and good_shape and my_turn <= 10:
                 return PushFoldResult(
-                    Decision.PUSH, 0.6,
-                    "ryanshanten, early round, low threat",
-                    safety_weight=0.05
-                )
-            if threat >= 1.5:
-                return PushFoldResult(
-                    Decision.BALANCED, 0.6,
-                    "ryanshanten, early, riichi opponent",
-                    safety_weight=0.15
+                    Decision.MAWASHI, 0.6,
+                    "ryanshanten, riichi but valuable+connected, mid-game"
                 )
             return PushFoldResult(
-                Decision.BALANCED, 0.6,
-                "ryanshanten, early round",
-                safety_weight=0.10
+                Decision.FOLD, 0.65,
+                "ryanshanten, riichi opponent"
             )
-        elif my_turn <= 12:
-            # Mid game
-            if threat >= 2.0:
-                return PushFoldResult(
-                    Decision.CAUTIOUS, 0.65,
-                    "ryanshanten, mid-game, multiple threats",
-                    safety_weight=0.30
-                )
-            if threat >= 1.0:
-                if hand_value >= risk * 0.5 and good_shape:
-                    return PushFoldResult(
-                        Decision.BALANCED, 0.6,
-                        "ryanshanten, mid-game, riichi but valuable+connected",
-                        safety_weight=0.18
-                    )
-                if hand_value >= risk * 0.5:
-                    return PushFoldResult(
-                        Decision.BALANCED, 0.6,
-                        "ryanshanten, mid-game, riichi but valuable",
-                        safety_weight=0.20
-                    )
-                return PushFoldResult(
-                    Decision.CAUTIOUS, 0.6,
-                    "ryanshanten, mid-game, riichi",
-                    safety_weight=0.25
-                )
+        if my_turn >= 12:
             return PushFoldResult(
-                Decision.BALANCED, 0.55,
-                "ryanshanten, mid-game, no threat",
-                safety_weight=0.10
+                Decision.MAWASHI, 0.6,
+                "ryanshanten, late, no threat"
             )
-        else:
-            # Late game ryanshanten: mostly defensive
-            if threat >= 1.5:
-                return PushFoldResult(
-                    Decision.CAUTIOUS, 0.7,
-                    "ryanshanten, late, threats present",
-                    safety_weight=0.40
-                )
-            if threat >= 0.5:
-                return PushFoldResult(
-                    Decision.CAUTIOUS, 0.6,
-                    "ryanshanten, late game",
-                    safety_weight=0.30
-                )
-            return PushFoldResult(
-                Decision.BALANCED, 0.55,
-                "ryanshanten, late, no threat",
-                safety_weight=0.18
-            )
-
-    # === 3+ away: heavily defensive, but turn-aware ===
-    if my_turn <= 6 and threat <= 0.5:
-        # Very early, no threat: can still develop
         return PushFoldResult(
-            Decision.BALANCED, 0.5,
-            f"shanten={shanten}, very early, no threat",
-            safety_weight=0.15
+            Decision.MAWASHI, 0.55,
+            "ryanshanten, cautious play"
         )
-    if threat >= 2.0:
+
+    # === 3+ away: fold or mawashi ===
+    if my_turn <= 6 and threat <= 0.5:
+        return PushFoldResult(
+            Decision.MAWASHI, 0.5,
+            f"shanten={shanten}, very early, no threat"
+        )
+    if threat >= 1.5:
         return PushFoldResult(
             Decision.FOLD, 0.85,
-            f"shanten={shanten} vs multiple threats, full fold",
-            safety_weight=0.65
+            f"shanten={shanten} vs threats, full fold"
         )
-    if threat >= 1.0:
+    if threat >= 0.5:
         return PushFoldResult(
-            Decision.CAUTIOUS, 0.75,
-            f"shanten={shanten} with riichi opponent",
-            safety_weight=0.50
+            Decision.FOLD, 0.7,
+            f"shanten={shanten} with some threat"
         )
-    if my_turn >= 12:
+    if my_turn >= 10:
         return PushFoldResult(
-            Decision.CAUTIOUS, 0.65,
-            f"shanten={shanten}, very late",
-            safety_weight=0.45
+            Decision.FOLD, 0.6,
+            f"shanten={shanten}, late game"
         )
     return PushFoldResult(
-        Decision.CAUTIOUS, 0.55,
-        f"shanten={shanten}, cautious play",
-        safety_weight=0.30
+        Decision.MAWASHI, 0.55,
+        f"shanten={shanten}, early but far from tenpai"
     )
 
 
 def adjust_for_placement(result: PushFoldResult, gs: GameState) -> PushFoldResult:
     """Adjust push/fold based on placement context.
 
-    - 4th place with big deficit: push harder (need to recover)
+    - 4th place: push harder (need to recover)
     - 1st place with big lead: play safer (protect lead)
     - All last special handling
     """
@@ -392,50 +325,49 @@ def adjust_for_placement(result: PushFoldResult, gs: GameState) -> PushFoldResul
     # === All Last (オーラス) special logic ===
     if gs.is_all_last:
         if placement == 1:
-            more_defensive = result.decision if result.decision.value >= Decision.CAUTIOUS.value else Decision.CAUTIOUS
-            return PushFoldResult(
-                more_defensive,
-                result.confidence,
-                f"all-last 1st place: {result.reason}",
-                safety_weight=max(result.safety_weight, 0.35)
-            )
+            # Leading: be more defensive
+            if result.decision == Decision.PUSH:
+                return PushFoldResult(
+                    Decision.MAWASHI,
+                    result.confidence,
+                    f"all-last 1st place, careful: {result.reason}"
+                )
+            return result
+
         if placement == 4:
-            if diff_above <= 8000:
-                return PushFoldResult(
-                    Decision.PUSH,
-                    0.8,
-                    "all-last 4th, reachable deficit",
-                    safety_weight=max(0.0, result.safety_weight - 0.20)
-                )
-            else:
-                return PushFoldResult(
-                    Decision.BALANCED,
-                    0.6,
-                    "all-last 4th, large deficit",
-                    safety_weight=max(0.0, result.safety_weight - 0.10)
-                )
+            # Must recover: push harder
+            if diff_above <= 12000:
+                if result.decision in (Decision.FOLD, Decision.MAWASHI):
+                    return PushFoldResult(
+                        Decision.PUSH if diff_above <= 8000 else Decision.MAWASHI,
+                        0.8,
+                        "all-last 4th, reachable deficit"
+                    )
+            return result
 
     # === South round general adjustments ===
     if gs.is_south:
         if placement == 1 and diff_below >= 12000:
-            return PushFoldResult(
-                result.decision,
-                result.confidence,
-                f"south, leading comfortably: {result.reason}",
-                safety_weight=min(1.0, result.safety_weight + 0.08)
-            )
+            # Comfortable lead: upgrade push to mawashi
+            if result.decision == Decision.PUSH:
+                return PushFoldResult(
+                    Decision.MAWASHI,
+                    result.confidence,
+                    f"south, leading comfortably: {result.reason}"
+                )
         if placement == 4 and diff_above >= 20000:
-            return PushFoldResult(
-                result.decision,
-                result.confidence,
-                f"south 4th, desperate: {result.reason}",
-                safety_weight=max(0.0, result.safety_weight - 0.12)
-            )
-
-    # === General placement adjustments (small) ===
-    if placement == 1:
-        result.safety_weight = min(1.0, result.safety_weight + 0.03)
-    elif placement == 4:
-        result.safety_weight = max(0.0, result.safety_weight - 0.03)
+            # Desperate: upgrade fold/mawashi to push
+            if result.decision == Decision.FOLD:
+                return PushFoldResult(
+                    Decision.MAWASHI,
+                    result.confidence,
+                    f"south 4th, desperate: {result.reason}"
+                )
+            if result.decision == Decision.MAWASHI:
+                return PushFoldResult(
+                    Decision.PUSH,
+                    result.confidence,
+                    f"south 4th, desperate push: {result.reason}"
+                )
 
     return result
