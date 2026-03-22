@@ -610,7 +610,7 @@ class GameState:
     def _threat_of(self, seat: int) -> float:
         """Get threat level of a specific player with full context."""
         return self.players[seat].apparent_threat_level(
-            self.turn, self.round_wind, self._opponent_wind(seat))
+            self.my_turn, self.round_wind, self._opponent_wind(seat))
 
     def threat_level_total(self) -> float:
         """Sum of all opponents' threat levels."""
@@ -889,7 +889,10 @@ class GameState:
     def _handle_reach(self, event: dict) -> None:
         actor = event.get("actor", -1)
         self.players[actor].riichi_declared = True
-        self.players[actor].riichi_turn = self.turn
+        # Store per-player turn (self.turn // 4), not global turn counter.
+        # All downstream comparisons (apparent_threat_level, push_fold,
+        # safety.py) use thresholds calibrated to per-player turns (0-17).
+        self.players[actor].riichi_turn = self.turn // 4
 
     def _handle_reach_accepted(self, event: dict) -> None:
         actor = event.get("actor", -1)

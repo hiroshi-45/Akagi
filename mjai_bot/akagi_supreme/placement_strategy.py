@@ -297,6 +297,11 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
     - Wait tile remaining count (山残り): uses unseen_count for actual wait tiles
     - Wait shape quality
     - Turn awareness
+
+    Top player thinking on riichi vs damaten:
+    - Riichi: +1han, ura dora chance, intimidation, but costs 1000pts and locks hand
+    - Damaten: flexibility, can change wait, no information leak, can dodge
+    - Mountain remaining (山残り) is critical: few tiles left = riichi for intimidation
     """
     if not adj.prefer_damaten:
         return False
@@ -305,8 +310,20 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
     bad_wait = acceptance_count > 0 and acceptance_count <= 4
 
     # === Very late game: damaten loses value ===
+    # Few turns remain — riichi's intimidation and ura dora chance are more
+    # valuable than damaten's flexibility when there's little time to use it.
     if my_turn >= 14 and not (gs.is_all_last and gs.my_placement == 1):
         return False
+
+    # === Wait tile mountain check (山残り) ===
+    # If very few wait tiles remain unseen, riichi's intimidation value
+    # increases (hard to tsumo anyway, so threaten opponents into folding).
+    # Conversely, many tiles remaining means damaten can still tsumo.
+    if acceptance_count > 0 and acceptance_count <= 2:
+        # Extremely thin wait (e.g., 1-2 tiles left): riichi for intimidation
+        # unless we're all-last 1st protecting a lead
+        if not (gs.is_all_last and gs.my_placement == 1):
+            return False
 
     # === Bad wait shape: riichi adds value via ura dora and intimidation ===
     if bad_wait and hand_value < 8000:

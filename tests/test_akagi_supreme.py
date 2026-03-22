@@ -624,3 +624,153 @@ class TestTanyaoDetection:
         val_tanyao = estimate_hand_value(gs_tanyao)
         val_no_tanyao = estimate_hand_value(gs_no_tanyao)
         assert val_tanyao > val_no_tanyao
+
+
+# ============================================================
+# Riichi turn tracking tests (per-player turn fix)
+# ============================================================
+
+class TestRiichiTurnTracking:
+    """Verify riichi_turn stores per-player turn, not global turn counter."""
+
+    def test_riichi_turn_is_per_player(self):
+        """Riichi at global turn 24 (per-player ~6) should store ~6."""
+        gs = GameState()
+        gs.process_event({"type": "start_game", "id": 0})
+        gs.process_event({
+            "type": "start_kyoku", "bakaze": "E", "kyoku": 1,
+            "honba": 0, "kyotaku": 0, "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E", "P", "P"],
+                ["?"] * 13, ["?"] * 13, ["?"] * 13
+            ]
+        })
+        # Simulate 24 tsumo events (6 rounds of 4 players)
+        tiles = ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m",
+                 "1p", "2p", "3p", "4p", "5p", "6p", "7p", "8p", "9p",
+                 "1s", "2s", "3s", "4s", "5s", "6s"]
+        for i in range(24):
+            actor = i % 4
+            gs.process_event({"type": "tsumo", "actor": actor, "pai": tiles[i] if actor != 0 else tiles[i]})
+            gs.process_event({"type": "dahai", "actor": actor, "pai": tiles[i], "tsumogiri": True})
+
+        # Player 1 declares riichi at global turn 25 (per-player turn 6)
+        gs.process_event({"type": "tsumo", "actor": 1, "pai": "?"})
+        gs.process_event({"type": "reach", "actor": 1})
+        gs.process_event({"type": "dahai", "actor": 1, "pai": "9m", "tsumogiri": False})
+
+        # riichi_turn should be per-player turn (~6), not global turn (25)
+        assert gs.players[1].riichi_turn <= 8  # per-player turn
+        assert gs.players[1].riichi_turn >= 4  # at least several rounds in
+
+    def test_early_riichi_threat_boost(self):
+        """Early riichi (per-player turn <= 6) should add threat bonus."""
+        gs = GameState()
+        gs.process_event({"type": "start_game", "id": 0})
+        gs.process_event({
+            "type": "start_kyoku", "bakaze": "E", "kyoku": 1,
+            "honba": 0, "kyotaku": 0, "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E", "P", "P"],
+                ["?"] * 13, ["?"] * 13, ["?"] * 13
+            ]
+        })
+        # Simulate a few turns, then player 1 riichi on turn ~4 (per-player ~1)
+        for i in range(4):
+            actor = i % 4
+            gs.process_event({"type": "tsumo", "actor": actor, "pai": "?"})
+            gs.process_event({"type": "dahai", "actor": actor, "pai": f"{i+1}m", "tsumogiri": True})
+
+        gs.process_event({"type": "tsumo", "actor": 1, "pai": "?"})
+        gs.process_event({"type": "reach", "actor": 1})
+        gs.process_event({"type": "dahai", "actor": 1, "pai": "9p", "tsumogiri": False})
+
+        # Early riichi should have higher threat than base riichi
+        threat = gs.players[1].apparent_threat_level(gs.my_turn, "E", "S")
+        assert threat >= 2.0  # base riichi (1.5) + early bonus (0.5) = 2.0
+
+
+# ============================================================
+# Dama tenpai risk estimation test
+# ============================================================
+
+class TestDamaTenpaiRisk:
+    def test_dama_signal_raises_risk(self):
+        """Tedashi after tsumogiri streak should raise risk above default."""
+        gs = GameState()
+        gs._initialized = True
+        gs.player_id = 0
+        gs.dealer = 1
+        gs.round_wind = "E"
+        gs.round_number = 1
+        gs.turn = 40  # mid-game
+        gs.my_hand = ["1m", "2m", "3m"] * 4 + ["E"]
+        for i, s in enumerate([25000, 25000, 25000, 25000]):
+            gs.players[i].score = s
+
+        # Set up player 2 with tsumogiri streak then tedashi
+        gs.players[2]._consecutive_tsumogiri = 4
+        gs.players[2]._tedashi_count = 1
+
+        risk = estimate_risk_of_deal_in(gs)
+        # Should be at least 7700 (mangan-level) due to dama signal
+        assert risk >= 7700
+
+
+# ============================================================
+# Iishanten late extreme threat FOLD test
+# ============================================================
+
+class TestIishantenLateFold:
+    def test_iishanten_late_extreme_threat_folds(self):
+        """Late iishanten with extreme threat and weak hand should FOLD."""
+        gs = GameState()
+        gs._initialized = True
+        gs.player_id = 0
+        gs.dealer = 1
+        gs.round_wind = "E"
+        gs.round_number = 1
+        gs.turn = 40
+        gs.my_hand = ["1m", "3m", "5p", "7p", "9s", "E", "S", "W", "N", "P", "F", "C", "1s"]
+        for i, s in enumerate([25000, 25000, 25000, 25000]):
+            gs.players[i].score = s
+
+        # Multiple riichi = extreme threat
+        gs.players[1].riichi_declared = True
+        gs.players[1].riichi_turn = 3
+        gs.players[2].riichi_declared = True
+        gs.players[2].riichi_turn = 4
+
+        result = evaluate_push_fold(gs, shanten=1, acceptance_count=4)
+        # With extreme threat (two riichi) and cheap hand, should fold
+        assert result.decision == Decision.FOLD
+
+
+# ============================================================
+# Damaten thin wait test
+# ============================================================
+
+class TestDamatenThinWait:
+    def test_very_thin_wait_prefers_riichi(self):
+        """With only 1-2 wait tiles remaining, riichi for intimidation."""
+        gs = GameState()
+        gs._initialized = True
+        gs.player_id = 0
+        gs.dealer = 1
+        gs.round_wind = "S"
+        gs.round_number = 4  # all-last
+        gs.turn = 32
+        gs.my_hand = ["1m"] * 13
+        for i, s in enumerate([30000, 25000, 23000, 22000]):
+            gs.players[i].score = s
+
+        # 2nd place with prefer_damaten, but very thin wait
+        adj = compute_placement_adjustment(gs)
+        # Even with prefer_damaten, thin wait (2 tiles) should not damaten
+        # because riichi intimidation is more valuable
+        result = should_damaten(gs, adj, hand_value=3000, acceptance_count=2)
+        assert result is False

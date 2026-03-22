@@ -172,10 +172,11 @@ class StrategyEngine:
         none_q = q_values[IDX_NONE] if IDX_NONE < len(q_values) else 0.0
         meld_q = q_values[best_meld]
 
-        # All-last 4th: aggressively consider melding (worst placement,
-        # nothing to lose). Top players take almost any meld here.
+        # All-last 4th: take almost any meld (worst placement, nothing to
+        # lose). Top players know 4th is already the worst outcome, so any
+        # chance to speed up the hand is worth taking.
         if gs.my_placement == 4:
-            if meld_q >= none_q - 0.25:
+            if meld_q >= none_q - 0.45:
                 return best_meld
 
         # All-last 3rd with 4th close: need speed to stay safe
