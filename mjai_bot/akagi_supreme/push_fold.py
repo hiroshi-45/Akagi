@@ -129,17 +129,20 @@ def estimate_hand_value(gs: GameState) -> float:
             han_estimate += 0.5  # possible honitsu
 
     # === Toitoi potential ===
-    pon_like_melds = sum(1 for m in melds if m.meld_type in ("pon", "daiminkan", "kakan", "ankan"))
-    pairs_in_hand = 0
-    counts = {}
-    for t in hand:
-        tb = tile_base(t)
-        counts[tb] = counts.get(tb, 0) + 1
-    for count in counts.values():
-        if count >= 2:
-            pairs_in_hand += 1
-    if pon_like_melds + pairs_in_hand >= 3:
-        han_estimate += 1.0  # strong toitoi potential
+    # Skip if chiitoitsu route: chiitoitsu (7 pairs) and toitoi (4 triplets)
+    # are mutually exclusive yaku. Adding both causes han overestimation.
+    if not is_chiitoi_route:
+        pon_like_melds = sum(1 for m in melds if m.meld_type in ("pon", "daiminkan", "kakan", "ankan"))
+        pairs_in_hand = 0
+        counts = {}
+        for t in hand:
+            tb = tile_base(t)
+            counts[tb] = counts.get(tb, 0) + 1
+        for count in counts.values():
+            if count >= 2:
+                pairs_in_hand += 1
+        if pon_like_melds + pairs_in_hand >= 3:
+            han_estimate += 1.0  # strong toitoi potential
 
     # === Menzen bonus for closed hand ===
     if not gs.my_info.is_open():

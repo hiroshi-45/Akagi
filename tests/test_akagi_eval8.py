@@ -395,3 +395,95 @@ class TestDealerBaseValue:
         # Previously was 3900 (overestimate)
         assert val <= 3500, \
             f"Dealer weak open hand should not be overestimated, got {val}"
+
+
+# ============================================================
+# Chiitoitsu + Toitoi mutual exclusion test
+# ============================================================
+
+class TestChiitoitsuToitoiExclusion:
+    """Chiitoitsu and toitoi are mutually exclusive yaku.
+
+    When a hand is on the chiitoitsu route (5+ pairs), toitoi should NOT
+    also be added. Previously both were counted, overestimating hand value.
+    """
+
+    def test_chiitoi_route_no_toitoi_bonus(self):
+        """5+ pairs (chiitoitsu route) should not also get toitoi bonus."""
+        from mjai_bot.akagi_supreme.push_fold import estimate_hand_value
+        gs = GameState()
+        gs._initialized = True
+        gs.player_id = 0
+        gs.dealer = 1  # non-dealer
+        gs.round_wind = "E"
+        gs.dora_indicators = []
+        # Closed hand with 6 pairs — clearly chiitoitsu route
+        gs.my_hand = [
+            "1m", "1m", "3p", "3p", "5s", "5s",
+            "E", "E", "P", "P", "F", "F", "9m",
+        ]
+        gs.players[0].melds = []
+
+        val = estimate_hand_value(gs)
+        # Chiitoitsu = 2 han; menzen bonus ~0.7; yakuhai (P, F pairs) ~0.8
+        # Total ~3.5 han → ~3900pts. Should NOT include +1 toitoi.
+        # With old bug (chiitoitsu+toitoi): ~4.5 han → ~7700pts
+        assert val < 7700, \
+            f"Chiitoi route should not get toitoi bonus, got {val}"
+
+    def test_open_toitoi_still_counted(self):
+        """Open hand with pon melds should still get toitoi bonus."""
+        from mjai_bot.akagi_supreme.push_fold import estimate_hand_value
+        gs = GameState()
+        gs._initialized = True
+        gs.player_id = 0
+        gs.dealer = 1
+        gs.round_wind = "E"
+        gs.dora_indicators = []
+        # Open hand with 2 pon melds + pairs in hand
+        gs.my_hand = ["3m", "3m", "7p", "7p", "1s", "1s", "9s"]
+        gs.players[0].melds = [
+            MeldInfo("pon", ["E", "E", "E"]),
+            MeldInfo("pon", ["P", "P", "P"]),
+        ]
+
+        val = estimate_hand_value(gs)
+        # Should include: yakuhai (E, P) +2, toitoi +1 = at least 3 han
+        # With 3 han non-dealer = 3900
+        assert val >= 3900, \
+            f"Open hand with pon melds should still get toitoi bonus, got {val}"
+
+
+# ============================================================
+# Dead code removal verification (safe_tiles_for_me removed)
+# ============================================================
+
+class TestSafeTilesRemovedNoRegression:
+    """Verify genbutsu logic works after safe_tiles_for_me removal."""
+
+    def test_genbutsu_uses_river_not_safe_tiles_field(self):
+        """Genbutsu detection should work via river tiles, not removed field."""
+        from mjai_bot.akagi_supreme.strategy_engine import StrategyEngine, ACTION_CONFIG_4P
+        engine = StrategyEngine(ACTION_CONFIG_4P)
+        gs = engine.gs
+        gs._initialized = True
+        gs.player_id = 0
+        gs.dealer = 1
+        gs.round_wind = "E"
+        gs.num_players = 4
+        gs.my_hand = ["1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E", "S", "W"]
+
+        # Player 1 riichis and has "S" in their river
+        gs.players[1].riichi_declared = True
+        gs.players[1].riichi_turn = 5
+        gs.players[1].river = [("S", False), ("N", True), ("F", False)]
+
+        mask = [True] * 46
+        # Find genbutsu — should find "S" (index 28) as safe
+        genbutsu = engine._find_genbutsu_discard(mask)
+        assert genbutsu is not None, "Should find genbutsu from river"
+        from mjai_bot.akagi_supreme.strategy_engine import ACTION_TILE_NAMES
+        tile_name = ACTION_TILE_NAMES[genbutsu]
+        # Should prefer S, N, or F (all in riichi player's river)
+        assert tile_name in ("S", "N", "F"), \
+            f"Genbutsu should be a tile from riichi player's river, got {tile_name}"

@@ -88,7 +88,6 @@ class PlayerInfo:
     riichi_ippatsu: bool = False
     is_dealer: bool = False
     # Derived
-    safe_tiles_for_me: Set[Tile] = field(default_factory=set)  # genbutsu
     # Tedashi tracking: count of consecutive tsumogiri before a tedashi
     _consecutive_tsumogiri: int = 0
     _last_tedashi_turn: int = 0
@@ -454,7 +453,6 @@ class GameState:
             p.riichi_declared = False
             p.riichi_turn = -1
             p.riichi_ippatsu = False
-            p.safe_tiles_for_me = set()
             p.post_riichi_safe = set()
             p._consecutive_tsumogiri = 0
             p._last_tedashi_turn = 0
@@ -994,8 +992,6 @@ class GameState:
             self.my_tsumo = None
         else:
             self._mark_visible(pai)
-            # Track genbutsu for me
-            player.safe_tiles_for_me.add(pai)
 
         # Track post-riichi genbutsu: tiles that riichi players passed on.
         # If player X has riichi and player Y (Y != X) discards a tile,
