@@ -389,22 +389,20 @@ def evaluate_push_fold(gs: GameState, shanten: int,
                     "iishanten, early vs threat"
                 )
 
-            # Good shape or decent value: evaluate late-game multi-threats
-            if my_turn >= 12 or effective_threat >= 2.0:
+            # Late game with moderate+ threat: evaluate carefully
+            # (effective_threat is capped < 1.8 here — higher threats
+            #  are handled by the >= 1.8 early return above)
+            if my_turn >= 12:
                 n_riichi = gs.num_riichi_opponents
                 if n_riichi >= 2 and hand_value < risk * 0.5:
                     return PushFoldResult(Decision.FOLD, 0.7, "iishanten, late, double riichi, weak hand")
-                if effective_threat >= 2.5 and hand_value < risk * 0.4:
-                    return PushFoldResult(Decision.FOLD, 0.7, "iishanten, late, extreme threat, weak hand")
-                
+
                 # Top players leading will strictly fold against high threat when not tenpai
-                if effective_threat >= 2.0 and gs.my_placement <= 2:
-                    return PushFoldResult(Decision.FOLD, 0.75, "iishanten, 1st/2nd place vs extreme threat - complete fold")
-                if my_turn >= 12 and effective_threat >= 1.5 and gs.my_placement <= 2 and hand_value < 8000:
+                if effective_threat >= 1.5 and gs.my_placement <= 2 and hand_value < 8000:
                     return PushFoldResult(Decision.FOLD, 0.75, "iishanten, late vs threat, 1st/2nd place without mangan - complete fold")
 
                 if hand_value >= risk * 0.5 and good_shape:
-                    if effective_threat >= 2.0 or (my_turn >= 12 and effective_threat >= 1.5):
+                    if effective_threat >= 1.5:
                         return PushFoldResult(Decision.MAWASHI, 0.65, "iishanten, late but valuable good-shape hand, forced to mawashi vs high threat")
                     return PushFoldResult(Decision.PUSH, 0.65, "iishanten, late but valuable good-shape hand")
                 if hand_value >= risk * 0.5:

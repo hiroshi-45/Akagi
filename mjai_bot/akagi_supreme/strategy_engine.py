@@ -401,14 +401,19 @@ class StrategyEngine:
                 return best_discard
             return ac.idx_reach
 
-        # Apply riichi multiplier to Q-value comparison
+        # Apply riichi multiplier to Q-value comparison.
+        # When placement strategy discourages riichi (multiplier < 0.8),
+        # discount riichi's Q-value before comparing to damaten.
+        # Without this, raw Q comparison almost never overrides Mortal's
+        # riichi choice, making the riichi_multiplier ineffective.
         if p_adj.riichi_multiplier < 0.8:
             best_discard = self._find_best_discard(q_values, mask)
             if best_discard is not None:
                 riichi_q = q_values[ac.idx_reach] if ac.idx_reach < len(q_values) else float('-inf')
                 discard_q = q_values[best_discard]
-                q_diff = riichi_q - discard_q
-                if q_diff < 0.05:
+                # Discount riichi Q-value by placement multiplier (handle negative Q correctly)
+                adjusted_riichi_q = riichi_q * p_adj.riichi_multiplier if riichi_q > 0 else riichi_q / p_adj.riichi_multiplier
+                if adjusted_riichi_q < discard_q + 0.05:
                     return best_discard
 
         return ac.idx_reach
