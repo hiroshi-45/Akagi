@@ -468,6 +468,14 @@ class GameState:
         self.players = [PlayerInfo() for _ in range(4)]
         self.reset_round()
 
+    def set_tonpu(self, is_tonpu: bool) -> None:
+        """Explicitly set game format (tonpu vs hanchan).
+
+        Should be called when the game format is known from lobby/match info.
+        Without this, the bot defaults to hanchan (safer assumption).
+        """
+        self._is_tonpu = is_tonpu
+
     # === Derived metrics ===
 
     @property
@@ -911,13 +919,9 @@ class GameState:
         #   (hanchan E4 is round 4, but S1 would be round 5)
         if self.round_wind == "S":
             self._is_tonpu = False
-        elif self.round_wind == "E" and self.round_number == 4 and self._round_count >= 4:
-            # We've reached E4 without seeing south wind in any prior round.
-            # This strongly suggests tonpu (in hanchan, E4 is just the 4th round).
-            # However, we can't be 100% sure on the first game. Use a heuristic:
-            # if round_count matches round_number, this is likely our progression
-            # through E1→E2→E3→E4 in a single game = tonpu.
-            self._is_tonpu = True
+        # NOTE: Removed unreliable E4 auto-detection heuristic.
+        # Hanchan with dealer repeats (renchan) can reach E4 with _round_count >= 4,
+        # falsely triggering tonpu. Use set_tonpu() for explicit configuration instead.
         self.honba = event.get("honba", 0)
         self.kyotaku = event.get("kyotaku", 0)
         self.dealer = event.get("oya", 0)

@@ -362,7 +362,11 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
     # === Very late game: damaten loses value ===
     # BUGFIX: In very late game (turn 14+), riichi is bad because of the 1000pt risk
     # and few draws left. Top players prefer damaten to maintain flexibility and save points.
-    if my_turn >= 14 and not (gs.is_all_last and gs.my_placement == 1):
+    # Exceptions:
+    # - All-last 1st: handled by later logic (protect lead vs riichi stick cost)
+    # - All-last 4th: riichi for +1 han; 1000pt cost is irrelevant when already
+    #   last, and damaten's "flexibility" is worthless with so few draws
+    if my_turn >= 14 and not (gs.is_all_last and gs.my_placement in (1, 4)):
         return True
 
     # === Tile-level mountain analysis (山残り) ===
