@@ -66,9 +66,10 @@ def _all_last_strategy(gs: GameState, placement: int,
     kyotaku_bonus = gs.kyotaku * 1000
 
     if placement == 1:
-        # Noten penalty is 3000 points; with honba sticks the effective
-        # swing can be larger. Account for honba in the risk calculation.
-        noten_penalty = 3000
+        # Noten penalty depends on how many players are tenpai/noten.
+        # Use the actual worst-case effect from GameState rather than
+        # a hardcoded 3000, which underestimates the risk.
+        noten_penalty = abs(gs.noten_penalty_effect())
         noten_risk = diff_below <= noten_penalty
         if noten_risk:
             return PlacementAdjustment(
@@ -318,6 +319,17 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
         return False
 
     my_turn = gs.my_turn
+
+    # === Opponent riichi: riichi for intimidation and ura dora ===
+    # When opponents have declared riichi, our riichi adds:
+    # 1. Intimidation: non-riichi opponents fold harder → fewer deal-ins to us
+    # 2. Ura dora: free value since hand is already locked
+    # 3. Ippatsu chance: opponents in riichi can't dodge
+    # Top players prefer riichi over damaten when opponents are in riichi,
+    # UNLESS we're all-last 1st protecting a lead (ending game > extra points).
+    if gs.num_riichi_opponents >= 1:
+        if not (gs.is_all_last and gs.my_placement == 1):
+            return False  # riichi, don't damaten
 
     # === Get tile-level wait information ===
     wait_details = gs.wait_tile_details()

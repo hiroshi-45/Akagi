@@ -213,6 +213,16 @@ def evaluate_push_fold(gs: GameState, shanten: int,
     threat = gs.max_opponent_threat()
     my_turn = gs.my_turn
 
+    # === Dealer bonus (親の打点1.5倍 + 連荘価値) ===
+    # Dealers get 1.5x payout AND keep dealership on win (renchan).
+    # Top players push significantly harder as dealer because:
+    # 1. Hand value is 1.5x (already reflected in estimate_hand_value)
+    # 2. Winning maintains oya = another chance to score
+    # 3. Not winning passes oya (opportunity cost)
+    # Reduce effective threat when we're dealer to model this aggression.
+    if gs.is_dealer_me:
+        threat *= 0.75  # dealer should push through moderate threats
+
     good_shape = acceptance_count >= 8
     bad_shape = acceptance_count > 0 and acceptance_count <= 4
 
