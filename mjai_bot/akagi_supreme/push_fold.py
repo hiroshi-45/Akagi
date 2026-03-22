@@ -21,10 +21,10 @@ from .game_state import GameState, Tile, parse_tile, is_honor, YAKUHAI_HONORS
 
 
 class Decision(Enum):
-    PUSH = "push"          # Full attack - trust Mortal's Q-values
-    BALANCED = "balanced"  # Slight safety bias on dangerous tiles
-    CAUTIOUS = "cautious"  # Moderate safety adjustment
-    FOLD = "fold"          # Maximum defense - prioritize safe tiles
+    PUSH = 0       # Full attack - trust Mortal's Q-values
+    BALANCED = 1   # Slight safety bias on dangerous tiles
+    CAUTIOUS = 2   # Moderate safety adjustment
+    FOLD = 3       # Maximum defense - prioritize safe tiles
 
 
 @dataclass
@@ -39,19 +39,25 @@ class PushFoldResult:
 def estimate_hand_value(gs: GameState) -> float:
     """Estimate potential hand value in points (rough).
 
-    Returns a multiplier representing hand quality.
-    Higher = more valuable hand worth pushing for.
+    Returns estimated point value (tsumo/ron average) as an actual point figure,
+    comparable to estimate_risk_of_deal_in().
     """
-    value = 1000.0  # base hand value (1 han 30 fu)
+    # Base: menzen riichi tsumo ~ 2000 non-dealer, 3900 dealer (1 han 30 fu average)
+    if gs.is_dealer_me:
+        value = 3900.0
+    else:
+        value = 2000.0
 
-    # Dora count
+    # Dora count — each dora roughly doubles/adds a han
     dora_count = gs.count_dora_in_hand()
-    if dora_count >= 3:
-        value *= 4.0
+    if dora_count >= 4:
+        value *= 6.0   # haneman+
+    elif dora_count >= 3:
+        value *= 4.0   # mangan~haneman
     elif dora_count >= 2:
-        value *= 2.5
+        value *= 2.5   # ~ 3 han
     elif dora_count >= 1:
-        value *= 1.5
+        value *= 1.6   # ~ 2 han
 
     # Yakuhai in hand (potential pon or head)
     hand_tiles = gs.my_hand
@@ -59,17 +65,19 @@ def estimate_hand_value(gs: GameState) -> float:
         if tile in YAKUHAI_HONORS:
             count = sum(1 for t in hand_tiles if t == tile)
             if count >= 3:
-                value *= 1.5
+                value *= 1.5  # confirmed yakuhai pon
             elif count >= 2:
-                value *= 1.2
+                value *= 1.15  # possible pon
 
-    # Riichi potential (menzen)
+    # Riichi bonus for closed hand (ippatsu/ura potential)
     if not gs.my_info.is_open():
-        value *= 1.3  # riichi bonus potential
+        value *= 1.2
 
-    # Dealer bonus
-    if gs.is_dealer_me:
-        value *= 1.5
+    # Kyotaku on table: winning gains all accumulated riichi sticks
+    value += gs.kyotaku * 1000
+
+    # Honba bonus
+    value += gs.honba * 300
 
     return value
 
@@ -125,16 +133,18 @@ def evaluate_push_fold(gs: GameState, shanten: int) -> PushFoldResult:
     placement = gs.my_placement
 
     # === Tenpai: almost always push ===
+    # Top players virtually never fold from tenpai. The only exception is when
+    # facing double/triple riichi with a cheap hand and real safe tiles available.
     if shanten <= 0:
-        if threat >= 2.5 and hand_value < 3000:
-            # Tenpai but cheap hand vs very dangerous opponent
+        if threat >= 3.0 and hand_value < 2000 and gs.remaining_tiles <= 30:
+            # Double+ riichi, late in round, cheap hand: slight safety bias on tile choice
             return PushFoldResult(
-                Decision.CAUTIOUS, 0.6,
-                "tenpai but cheap hand vs high threat",
-                safety_weight=0.25
+                Decision.BALANCED, 0.6,
+                "tenpai but cheap hand vs double riichi late game",
+                safety_weight=0.10
             )
         return PushFoldResult(
-            Decision.PUSH, 0.9,
+            Decision.PUSH, 0.95,
             "tenpai - push",
             safety_weight=0.0
         )
@@ -142,29 +152,32 @@ def evaluate_push_fold(gs: GameState, shanten: int) -> PushFoldResult:
     # === Iishanten (1-away): context-dependent ===
     if shanten == 1:
         if threat <= 0.5:
-            # No serious threat
+            # No serious threat: proceed toward tenpai
             return PushFoldResult(
                 Decision.PUSH, 0.8,
                 "iishanten, low threat",
                 safety_weight=0.05
             )
-        if hand_value >= risk * 0.6:
-            # Good hand value relative to risk
+        # Value/risk ratio: both in the same point unit now
+        if hand_value >= risk * 0.5:
+            # Hand value justifies the risk
             return PushFoldResult(
                 Decision.BALANCED, 0.7,
                 "iishanten, decent value vs risk",
-                safety_weight=0.15
+                safety_weight=0.12
             )
         if threat >= 1.5:
+            # Single riichi or dangerous open hand: moderate safety bias
+            # but do NOT heavily fold from iishanten — top players keep advancing
             return PushFoldResult(
-                Decision.CAUTIOUS, 0.65,
-                "iishanten but high threat",
-                safety_weight=0.35
+                Decision.BALANCED, 0.65,
+                "iishanten, riichi opponent",
+                safety_weight=0.20
             )
         return PushFoldResult(
             Decision.BALANCED, 0.7,
             "iishanten, moderate situation",
-            safety_weight=0.20
+            safety_weight=0.15
         )
 
     # === Ryanshanten (2-away): lean defensive ===
@@ -174,43 +187,57 @@ def evaluate_push_fold(gs: GameState, shanten: int) -> PushFoldResult:
             return PushFoldResult(
                 Decision.BALANCED, 0.6,
                 "ryanshanten, early round low threat",
-                safety_weight=0.15
+                safety_weight=0.12
+            )
+        if threat >= 2.0:
+            # Multiple or very dangerous threats: cautious play
+            return PushFoldResult(
+                Decision.CAUTIOUS, 0.7,
+                "ryanshanten vs multiple threats",
+                safety_weight=0.40
             )
         if threat >= 1.0:
             return PushFoldResult(
-                Decision.CAUTIOUS, 0.7,
-                "ryanshanten with threat",
-                safety_weight=0.45
+                Decision.CAUTIOUS, 0.65,
+                "ryanshanten with single riichi",
+                safety_weight=0.30
             )
-        if hand_value >= risk * 0.8 and gs.remaining_tiles > 30:
+        if hand_value >= risk * 0.6 and gs.remaining_tiles > 30:
             return PushFoldResult(
                 Decision.BALANCED, 0.55,
                 "ryanshanten but high value hand",
-                safety_weight=0.25
+                safety_weight=0.20
             )
         return PushFoldResult(
             Decision.CAUTIOUS, 0.6,
             "ryanshanten, moderate defense",
-            safety_weight=0.35
+            safety_weight=0.28
         )
 
     # === 3+ away: heavily defensive ===
-    if threat >= 0.5:
+    if threat >= 2.0:
+        # Multiple threats: full fold
         return PushFoldResult(
-            Decision.FOLD, 0.8,
-            f"shanten={shanten} with threat, full fold",
+            Decision.FOLD, 0.85,
+            f"shanten={shanten} vs multiple threats, full fold",
             safety_weight=0.70
+        )
+    if threat >= 1.0:
+        return PushFoldResult(
+            Decision.CAUTIOUS, 0.75,
+            f"shanten={shanten} with riichi opponent",
+            safety_weight=0.55
         )
     if gs.remaining_tiles <= 30:
         return PushFoldResult(
             Decision.CAUTIOUS, 0.65,
             f"shanten={shanten}, late in round",
-            safety_weight=0.50
+            safety_weight=0.45
         )
     return PushFoldResult(
         Decision.CAUTIOUS, 0.55,
         f"shanten={shanten}, cautious play",
-        safety_weight=0.40
+        safety_weight=0.35
     )
 
 
@@ -229,8 +256,10 @@ def adjust_for_placement(result: PushFoldResult, gs: GameState) -> PushFoldResul
     if gs.is_all_last:
         if placement == 1:
             # Leading in all-last: play very safe
+            # Use integer-valued enum so max() picks the more defensive option
+            more_defensive = result.decision if result.decision.value >= Decision.CAUTIOUS.value else Decision.CAUTIOUS
             return PushFoldResult(
-                max(result.decision, Decision.CAUTIOUS, key=lambda d: d.value),
+                more_defensive,
                 result.confidence,
                 f"all-last 1st place: {result.reason}",
                 safety_weight=max(result.safety_weight, 0.40)

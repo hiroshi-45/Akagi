@@ -23,7 +23,7 @@ from ..strategy.safety import (
 from .game_state import GameState, Tile
 from .push_fold import (
     Decision, PushFoldResult, evaluate_push_fold,
-    adjust_for_placement, estimate_hand_value
+    adjust_for_placement, estimate_hand_value, estimate_risk_of_deal_in
 )
 from .placement_strategy import (
     PlacementAdjustment, compute_placement_adjustment, should_damaten
@@ -132,8 +132,10 @@ class StrategyEngine:
         p_adj: PlacementAdjustment,
     ) -> int:
         """Decide whether to declare riichi or damaten."""
-        # Check if damaten is strategically preferred
-        if should_damaten(self.gs, p_adj):
+        hand_value = estimate_hand_value(self.gs)
+
+        # Check if damaten is strategically preferred (passes hand_value for cost analysis)
+        if should_damaten(self.gs, p_adj, hand_value=hand_value):
             # Find the best discard instead of riichi
             best_discard = self._find_best_discard(q_values, mask, safety_weight=0.0)
             if best_discard is not None:
@@ -143,13 +145,14 @@ class StrategyEngine:
 
         # Apply riichi multiplier to Q-value comparison
         if p_adj.riichi_multiplier < 0.8:
-            # Strongly discouraged: check if damaten tile exists
+            # Strongly discouraged: compare adjusted Q-values
             best_discard = self._find_best_discard(q_values, mask, safety_weight=0.0)
             if best_discard is not None:
                 riichi_q = q_values[IDX_REACH] if IDX_REACH < len(q_values) else float('-inf')
                 discard_q = q_values[best_discard]
-                # Only skip riichi if the discard Q-value is within range
-                if discard_q >= riichi_q * 0.7:
+                # Require discard Q-value to be at least 85% of riichi Q-value
+                # (was 70% — too lenient, would damaten too often)
+                if discard_q >= riichi_q * 0.85:
                     return best_discard
 
         return IDX_REACH
