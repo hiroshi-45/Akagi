@@ -108,10 +108,14 @@ def estimate_hand_value(gs: GameState) -> float:
         elif dominant_suit_count + suit_counts["z"] >= len(hand) - 2:
             han_estimate += 0.5  # possible honitsu
 
-    # === Riichi potential for closed hand ===
+    # === Menzen bonus for closed hand ===
+    # Closed hands CAN declare riichi (+1 han + ura dora), but we don't
+    # know at estimation time whether we actually will. Use a discounted
+    # value: menzen tsumo (0.5 probability-weighted) + riichi option value.
+    # Full riichi value (1.0 + 0.3 ura) was too aggressive — it inflated
+    # hand value for dama/fold situations where riichi won't happen.
     if not gs.my_info.is_open():
-        han_estimate += 1.0  # riichi
-        han_estimate += 0.3  # ippatsu/ura dora average contribution
+        han_estimate += 0.7  # discounted riichi option value
 
     # === Convert han estimate to points ===
     if han_estimate >= 11:

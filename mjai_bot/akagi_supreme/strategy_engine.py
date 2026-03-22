@@ -221,11 +221,14 @@ class StrategyEngine:
         none_q = q_values[ac.idx_none] if ac.idx_none < len(q_values) else 0.0
         meld_q = q_values[best_meld]
 
-        # All-last 4th: take ANY meld (worst placement, nothing to lose).
-        # Top players know 4th is already the worst outcome, so every
-        # chance to speed up the hand is worth taking. No Q-value gate.
+        # All-last 4th: aggressively take melds (worst placement, nothing to lose).
+        # Top players know 4th is already the worst outcome, so most
+        # chances to speed up the hand are worth taking. However, even
+        # desperate players shouldn't take a meld that Mortal strongly
+        # rejects (e.g., pon that kills hand structure with no yaku path).
         if gs.my_placement == 4:
-            return best_meld
+            if meld_q >= none_q - 0.15:
+                return best_meld
 
         # All-last 3rd with 4th close: need speed to stay safe
         if gs.my_placement == 3 and gs.diff_to_below < 4000:
@@ -291,19 +294,32 @@ class StrategyEngine:
         """Decide whether to accept or decline a meld opportunity.
 
         Enhanced with:
-        - Fold mode: skip chi, be cautious with pon
-        - Yakuhai/dora pon awareness: always accept valuable pons
+        - Fold mode: skip chi, be cautious with pon (checked FIRST)
+        - Yakuhai/dora pon awareness: accept valuable pons when NOT folding
         - Placement-driven meld encouragement
         """
         gs = self.gs
         ac = self.ac
 
-        # === Always accept yakuhai pon (役牌ポン) ===
+        # === In FOLD: reject melds first (top priority except all-last 4th) ===
+        # Top players in full betaori do NOT meld — even yakuhai pon.
+        # Taking a pon while folding opens the hand, commits to attack mode,
+        # and risks deal-in on subsequent discards. The only exception is
+        # all-last 4th where there's nothing to lose.
+        if pf_result.decision == Decision.FOLD and not (gs.is_all_last and gs.my_placement == 4):
+            if ac.idx_none < len(mask) and mask[ac.idx_none]:
+                if mortal_action in ac.chi_indices:
+                    return ac.idx_none
+                if mortal_action == ac.idx_pon:
+                    pon_q = q_values[mortal_action]
+                    none_q = q_values[ac.idx_none]
+                    # Even yakuhai pon needs a very strong Q-value advantage
+                    # to override FOLD. This is intentionally strict.
+                    if pon_q < none_q + 0.15:
+                        return ac.idx_none
+
+        # === Accept yakuhai pon (役牌ポン) when not folding ===
         if mortal_action == ac.idx_pon:
-            # Check if the pon target is a yakuhai
-            # We infer from Mortal choosing pon — check if it's a yakuhai tile
-            # by looking at what tile was just discarded (most recent in an
-            # opponent's river)
             pon_tile = self._get_last_opponent_discard()
             if pon_tile and gs.is_my_yakuhai(tile_base(pon_tile)):
                 return mortal_action  # always pon yakuhai
@@ -326,19 +342,6 @@ class StrategyEngine:
                 # Require meld Q-value to exceed pass by the menzen penalty
                 if meld_q < none_q + menzen_penalty:
                     return ac.idx_none
-
-        # === In FOLD: skip chi entirely, very cautious with pon ===
-        # Exception: all-last 4th should never fold — meld for speed.
-        if pf_result.decision == Decision.FOLD and not (gs.is_all_last and gs.my_placement == 4):
-            if mortal_action in ac.chi_indices:
-                if ac.idx_none < len(mask) and mask[ac.idx_none]:
-                    return ac.idx_none
-            if mortal_action == ac.idx_pon:
-                if ac.idx_none < len(mask) and mask[ac.idx_none]:
-                    pon_q = q_values[mortal_action]
-                    none_q = q_values[ac.idx_none]
-                    if pon_q < none_q + 0.15:
-                        return ac.idx_none
 
         # === In MAWASHI: slight bias against chi ===
         if pf_result.decision == Decision.MAWASHI:
