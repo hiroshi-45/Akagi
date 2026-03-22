@@ -165,6 +165,75 @@ class PlayerInfo:
         pon_count = sum(1 for m in self.melds if m.meld_type in ("pon", "daiminkan", "kakan", "ankan"))
         return pon_count >= 2
 
+    def estimate_open_hand_points(self, round_wind: str = "E",
+                                   seat_wind: str = "E",
+                                   doras: list = None) -> int:
+        """Estimate minimum points for an open hand based on visible melds.
+
+        Used for threat assessment: how much would dealing in cost?
+        Returns estimated points (ron, non-dealer baseline).
+        """
+        if not self.is_open():
+            return 0
+
+        han = 0
+        fu = 30  # base fu for open hand
+
+        # Count yakuhai from melds
+        dragon_count = 0
+        for m in self.melds:
+            if m.meld_type in ("pon", "daiminkan", "kakan", "ankan"):
+                if len(m.tiles) > 0:
+                    t = tile_base(m.tiles[0])
+                    if t in YAKUHAI_HONORS:  # 白發中
+                        han += 1
+                        dragon_count += 1
+                    if t == round_wind:
+                        han += 1
+                    if t == seat_wind:
+                        han += 1
+                    # Ankan adds extra fu
+                    if m.meld_type == "ankan":
+                        if t in HONORS:
+                            fu += 32
+                        else:
+                            fu += 16
+                    elif m.meld_type in ("pon", "daiminkan", "kakan"):
+                        if t in HONORS:
+                            fu += 4
+                        else:
+                            fu += 2
+
+        # Small three dragons (小三元): 2 dragon pons = at least 4 han
+        if dragon_count >= 2:
+            han += 2  # 小三元 is worth 2 han on its own + the 2 yakuhai pons
+
+        # Honitsu/Chinitsu from melds + river
+        target_suit = self.detect_honitsu_chinitsu()
+        if target_suit is not None:
+            han += 2  # open honitsu
+
+        # Toitoi
+        if self.detect_toitoi_signal():
+            han += 2  # open toitoi
+
+        # Dora in melds
+        if doras:
+            for m in self.melds:
+                for t in m.tiles:
+                    base = tile_base(t)
+                    for d in doras:
+                        if base == d:
+                            han += 1
+                    if t.endswith("r"):
+                        han += 1
+
+        if han == 0:
+            return 0  # no yaku visible
+
+        # Estimate points from han/fu
+        return _calculate_points(han, fu, self.is_dealer, False)
+
     def tedashi_after_tsumogiri_streak(self) -> bool:
         """Whether last event was tedashi after a streak of tsumogiri.
 
@@ -463,48 +532,47 @@ class GameState:
         return 0
 
     def estimate_acceptance_count(self) -> int:
-        """Rough estimate of useful tile count for improving hand.
+        """Estimate useful tile count for improving hand (reducing shanten).
 
-        Counts tiles that could form mentsu with existing pairs/partial-mentsu.
-        This is a simplified version — real acceptance count needs shanten analysis.
+        Uses a simplified shanten-reduction check: for each possible draw,
+        simulate adding it and removing each tile, checking if the resulting
+        hand has better mentsu/partial-mentsu structure.
+
+        This is more accurate than "any connected tile" — it requires the
+        draw to actually improve the hand structure.
         """
         hand_counts = _hand_to_34(self.my_hand)
+        current_deficiency = _estimate_deficiency(hand_counts)
         acceptance = 0
 
-        # For each tile type, check if drawing it could help
         for idx in range(34):
-            if self.visible_counts[idx] >= 4:
-                continue  # no copies left
-            remaining = 4 - self.visible_counts[idx]
+            remaining = max(0, 4 - self.visible_counts[idx])
             if remaining <= 0:
                 continue
 
-            # Check if this tile connects to something in hand
-            if idx < 27:
-                # Number tile
-                suit_offset = (idx // 9) * 9
-                rank = idx - suit_offset  # 0-8
-                # Would form pair
-                if hand_counts[idx] == 1:
-                    acceptance += remaining
+            # Simulate drawing this tile
+            hand_counts[idx] += 1
+
+            # Check if any discard reduces deficiency
+            improved = False
+            for discard_idx in range(34):
+                if hand_counts[discard_idx] <= 0:
                     continue
-                # Would form mentsu with adjacent
-                if rank >= 1 and hand_counts[idx - 1] >= 1:
-                    acceptance += remaining
-                    continue
-                if rank <= 7 and hand_counts[idx + 1] >= 1:
-                    acceptance += remaining
-                    continue
-                if rank >= 2 and hand_counts[idx - 2] >= 1:
-                    acceptance += remaining
-                    continue
-                if rank <= 6 and hand_counts[idx + 2] >= 1:
-                    acceptance += remaining
-                    continue
-            else:
-                # Honor tile: only pairs/triplets matter
-                if hand_counts[idx] >= 1:
-                    acceptance += remaining
+                if discard_idx == idx and hand_counts[discard_idx] <= 1:
+                    continue  # can't discard the only copy we just drew
+
+                hand_counts[discard_idx] -= 1
+                new_deficiency = _estimate_deficiency(hand_counts)
+                hand_counts[discard_idx] += 1
+
+                if new_deficiency < current_deficiency:
+                    improved = True
+                    break
+
+            hand_counts[idx] -= 1
+
+            if improved:
+                acceptance += remaining
 
         return acceptance
 
@@ -827,6 +895,103 @@ def _hand_to_34(hand: List[Tile]) -> List[int]:
         if 0 <= idx < 34:
             counts[idx] += 1
     return counts
+
+
+def _estimate_deficiency(counts: List[int]) -> int:
+    """Estimate hand deficiency (roughly correlates with shanten).
+
+    Counts how many more tiles are needed to complete 4 mentsu + 1 jantai.
+    Uses a greedy approach: extract complete mentsu first, then partial blocks.
+
+    Lower deficiency = closer to tenpai.
+    """
+    best = 8  # worst case: 8 tiles away (shanten=8)
+
+    # Try each tile as the pair (jantai)
+    for pair_idx in range(34):
+        if counts[pair_idx] < 2:
+            continue
+        counts[pair_idx] -= 2
+        mentsu, partial = _count_mentsu_and_partial(counts)
+        # Need 4 mentsu total; each mentsu = 0 deficiency, each partial = 1
+        needed = 4 - mentsu
+        if needed <= 0:
+            deficiency = 0
+        else:
+            # partials can become mentsu with 1 more tile each
+            usable_partial = min(partial, needed)
+            deficiency = (needed - usable_partial) * 2 + usable_partial
+        best = min(best, deficiency)
+        counts[pair_idx] += 2
+
+    # Also try without a pair (tanki wait)
+    mentsu, partial = _count_mentsu_and_partial(counts)
+    needed = 4 - mentsu
+    if needed <= 0:
+        deficiency = 1  # need pair only
+    else:
+        usable_partial = min(partial, needed)
+        deficiency = (needed - usable_partial) * 2 + usable_partial + 1
+    best = min(best, deficiency)
+
+    return best
+
+
+def _count_mentsu_and_partial(counts: List[int]) -> tuple:
+    """Count complete mentsu and partial blocks in hand (greedy).
+
+    Returns (mentsu_count, partial_count).
+    """
+    c = list(counts)  # work on copy
+    mentsu = 0
+    partial = 0
+
+    # Extract complete mentsu first (greedy)
+    # Kotsu (triplets) for honors
+    for i in range(27, 34):
+        while c[i] >= 3:
+            c[i] -= 3
+            mentsu += 1
+
+    # Shuntsu (sequences) for number tiles
+    for suit_start in (0, 9, 18):
+        for rank in range(7):
+            idx = suit_start + rank
+            while c[idx] >= 1 and c[idx + 1] >= 1 and c[idx + 2] >= 1:
+                c[idx] -= 1
+                c[idx + 1] -= 1
+                c[idx + 2] -= 1
+                mentsu += 1
+
+    # Remaining kotsu for number tiles
+    for i in range(27):
+        while c[i] >= 3:
+            c[i] -= 3
+            mentsu += 1
+
+    # Count partial blocks (pairs, adjacent pairs for sequences)
+    # Pairs
+    for i in range(34):
+        if c[i] >= 2:
+            c[i] -= 2
+            partial += 1
+
+    # Adjacent/skip pairs (partial sequences)
+    for suit_start in (0, 9, 18):
+        for rank in range(8):
+            idx = suit_start + rank
+            if c[idx] >= 1 and c[idx + 1] >= 1:
+                c[idx] -= 1
+                c[idx + 1] -= 1
+                partial += 1
+        for rank in range(7):
+            idx = suit_start + rank
+            if c[idx] >= 1 and c[idx + 2] >= 1:
+                c[idx] -= 1
+                c[idx + 2] -= 1
+                partial += 1
+
+    return mentsu, partial
 
 
 def _ceil100(n: int) -> int:
