@@ -66,7 +66,10 @@ def _all_last_strategy(gs: GameState, placement: int,
     kyotaku_bonus = gs.kyotaku * 1000
 
     if placement == 1:
-        noten_risk = diff_below <= 3000
+        # Noten penalty is 3000 points; with honba sticks the effective
+        # swing can be larger. Account for honba in the risk calculation.
+        noten_penalty = 3000
+        noten_risk = diff_below <= noten_penalty
         if noten_risk:
             return PlacementAdjustment(
                 riichi_multiplier=0.8,
@@ -124,11 +127,14 @@ def _all_last_strategy(gs: GameState, placement: int,
                 reason=f"all-last 2nd, 1st reachable ({han_for_1st_ron}han ron)"
             )
         if diff_below < 4000:
+            # 3rd is close — riichi stick cost (1000pts) could narrow the gap
+            # further, and riichi locks the hand. Damaten preserves flexibility
+            # to dodge dangerous tiles and protect 2nd place.
             return PlacementAdjustment(
-                riichi_multiplier=1.0,
+                riichi_multiplier=0.9,
                 meld_multiplier=1.0,
-                prefer_damaten=False,
-                reason="all-last 2nd, 3rd is close - push"
+                prefer_damaten=True,
+                reason="all-last 2nd, 3rd is close - damaten to protect"
             )
         if diff_below < 8000:
             return PlacementAdjustment(

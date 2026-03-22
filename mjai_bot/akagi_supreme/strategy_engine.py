@@ -152,11 +152,17 @@ class StrategyEngine:
 
         # If hora is available but Mortal declined: respect Mortal in most
         # cases (着順 reasons — e.g. cheap ron that drops placement).
-        # Exception: all-last 4th MUST take any agari. 4th is already the
-        # worst outcome, so any win is an improvement regardless of value.
-        if (ac.idx_hora < len(mask) and mask[ac.idx_hora]
-                and gs.is_all_last and gs.my_placement == 4):
-            return ac.idx_hora
+        # Exceptions where top players ALWAYS take agari:
+        # 1. All-last 4th: worst outcome, any win is an improvement
+        # 2. All-last 1st: ending the game preserves 1st place
+        # 3. All-last 2nd/3rd: agari can only improve or maintain placement
+        if ac.idx_hora < len(mask) and mask[ac.idx_hora] and self.gs.is_all_last:
+            # All-last: any agari ends the game. Top players take it unless
+            # it would actually drop placement (extremely rare edge case
+            # that Mortal handles by declining hora).
+            # For 4th and 1st place, ALWAYS take — there's no downside.
+            if self.gs.my_placement == 4 or self.gs.my_placement == 1:
+                return ac.idx_hora
 
         # === Evaluate strategic context ===
         acceptance = self.gs.estimate_acceptance_count()
@@ -505,11 +511,12 @@ class StrategyEngine:
                 continue
             if not p.riichi_declared:
                 continue
-            # Tiles in the riichi player's own river
+            # Tiles in the riichi player's own river (normalize red dora)
             for tile, _ in p.river:
                 base = tile_base(tile)
                 genbutsu_tiles[base] = genbutsu_tiles.get(base, 0) + 1
             # Tiles others discarded after this player's riichi (passed on)
+            # post_riichi_safe already stores tile_base-normalized values
             for base in p.post_riichi_safe:
                 genbutsu_tiles[base] = genbutsu_tiles.get(base, 0) + 1
 
