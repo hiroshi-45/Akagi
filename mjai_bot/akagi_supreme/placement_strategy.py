@@ -65,12 +65,29 @@ def _all_last_strategy(gs: GameState, placement: int,
                         is_dealer: bool) -> PlacementAdjustment:
     """Special strategy for the final round.
 
-    Enhanced with precise reversal calculations and supply stick awareness.
+    Enhanced with:
+    - Precise reversal calculations and supply stick awareness
+    - Direct hit (直撃) conditions for targeted reversal
+    - Noten penalty (ノーテン罰符) awareness
     """
     kyotaku_bonus = gs.kyotaku * 1000
 
     if placement == 1:
         # Leading in all-last: protect the lead
+        # Consider noten penalty: if lead <= 3000, being noten at ryukyoku
+        # could cost us 1st place (worst case -3000 from noten penalty)
+        noten_risk = diff_below <= 3000
+        if noten_risk:
+            # Thin lead + noten penalty risk: need to stay tenpai or win
+            # Push slightly harder to maintain tenpai
+            return PlacementAdjustment(
+                riichi_multiplier=0.8,
+                meld_multiplier=0.9,
+                extra_safety=0.08,
+                prefer_damaten=True,
+                reason="all-last 1st, thin lead, noten penalty risk"
+            )
+
         # Key question: can opponents overtake with a tsumo?
         if diff_below >= 12000:
             return PlacementAdjustment(
@@ -102,6 +119,25 @@ def _all_last_strategy(gs: GameState, placement: int,
         pts_for_1st = gs.points_needed_for_placement(1)
         han_for_1st_ron = gs.min_han_for_points(pts_for_1st, is_tsumo=False)
         han_for_1st_tsumo = gs.min_han_for_points(pts_for_1st, is_tsumo=True)
+
+        # Check direct hit on 1st place player
+        first_seat = None
+        for i, p in enumerate(gs.players):
+            if i != gs.player_id and p.score >= max(pp.score for pp in gs.players):
+                first_seat = i
+                break
+        if first_seat is not None:
+            direct_pts = gs.points_needed_direct_hit(first_seat, 1)
+            han_direct = gs.min_han_for_points(direct_pts, is_tsumo=False)
+            # Direct hit is easier than normal ron (opponent loses what we gain)
+            if han_direct < han_for_1st_ron and han_direct <= 2:
+                return PlacementAdjustment(
+                    riichi_multiplier=1.1,
+                    meld_multiplier=1.0,
+                    extra_safety=0.0,
+                    min_push_value=max(1000, direct_pts),
+                    reason=f"all-last 2nd, direct hit on 1st ({han_direct}han)"
+                )
 
         if han_for_1st_ron <= 3:
             # Can overtake 1st with a small hand direct hit
@@ -321,21 +357,40 @@ def _east_strategy(gs: GameState, placement: int,
 
 
 def should_damaten(gs: GameState, adj: PlacementAdjustment,
-                   hand_value: float = 0.0) -> bool:
+                   hand_value: float = 0.0,
+                   acceptance_count: int = 0) -> bool:
     """Whether to consider damaten (hidden tenpai) over riichi.
 
-    Enhanced to work in more situations than just all-last 1st:
-    - Mangan+ hand where riichi doesn't add meaningful value
-    - Situations where losing 1000 pts for riichi stick is costly
-    - When opponent dealing into dama is more likely than riichi win
+    Enhanced with:
+    - Wait shape quality: bad shape (few tiles) favors riichi (need ura dora),
+      good shape favors damaten (high win rate without revealing)
+    - Turn awareness: early damaten is more valuable (opponents push more),
+      late damaten is less valuable (fewer turns to win)
+    - Acceptance count integration
 
     Still prefer riichi when:
     - Hand is cheap and needs riichi to be meaningful
     - Large kyotaku makes winning more rewarding
-    - In east round where tempo matters
+    - Bad wait shape where riichi ura dora is the value source
+    - Very late game where intimidation matters less
     """
     if not adj.prefer_damaten:
         return False
+
+    my_turn = gs.my_turn
+    bad_wait = acceptance_count > 0 and acceptance_count <= 4
+
+    # === Very late game: damaten loses value (fewer chances to win) ===
+    # Exception: all-last 1st place where any agari wins
+    if my_turn >= 14 and not (gs.is_all_last and gs.my_placement == 1):
+        return False
+
+    # === Bad wait shape: riichi adds value via ura dora and intimidation ===
+    # Unless the hand is already very expensive or placement demands it
+    if bad_wait and hand_value < 8000:
+        # Bad wait + cheap hand: riichi is almost always better
+        if not (gs.is_all_last and gs.my_placement == 1 and gs.diff_to_below <= 1000):
+            return False
 
     # === All-last 1st place ===
     if gs.is_all_last and gs.my_placement == 1:
@@ -372,13 +427,11 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
         if hand_value >= 8000 and lead <= 8000:
             return True
 
-    # === Any placement: mangan+ closed hand ===
-    # When hand is already mangan+, riichi only adds ura dora potential
-    # but reveals tenpai. Top players sometimes damaten expensive hands
-    # to increase chance of dealing-in from opponents.
-    if hand_value >= 12000 and not gs.my_info.is_open():
-        # Haneman+ hand: damaten is a viable option
-        # But only if prefer_damaten flag is set by placement logic
+    # === Any placement: haneman+ closed hand with GOOD wait ===
+    # When hand is already haneman+, riichi only adds ura dora potential
+    # but reveals tenpai. Good-wait damaten has high win rate.
+    # Bad-wait haneman+ still prefers riichi for intimidation.
+    if hand_value >= 12000 and not gs.my_info.is_open() and not bad_wait:
         return True
 
     return False

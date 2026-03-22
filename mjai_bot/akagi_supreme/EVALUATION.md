@@ -157,3 +157,46 @@ akagi_supreme は正しいアーキテクチャを持つが、介入ロジック
 
 トッププレイヤーの思考を正しく反映するには、上記の致命的・重大な問題の修正が必須。
 特に「受入枚数の活用」「符計算の導入」「アガリ/パスの例外処理」「待ち形評価」が最優先課題。
+
+---
+
+## 第二回評価に基づく修正（2026-03-22）
+
+### game_state.py
+- **東風戦対応**: `_is_tonpu` フィールド追加、`is_all_last`/`is_late_game` を東風/半荘両対応
+- **符計算対応**: `_calculate_points(han, fu, is_dealer, is_tsumo)` を追加、`min_han_for_points` に `fu` パラメータ追加。20符(ピンフツモ)、25符(七対子)、30/40/50符すべて対応
+- **脅威度推定強化**: `apparent_threat_level` に `round_wind`/`seat_wind` パラメータ追加
+  - 風牌の役牌ポン検出（自風・場風）
+  - 小三元ポテンシャル検出（三元牌ポン2つ）
+  - 門前ホンイツを河から検出（`detect_honitsu_from_river()`）
+  - 手出し内容分析（中張牌の手出し=強い手のシグナル）
+- **直撃条件計算**: `points_needed_direct_hit()` 追加
+- **ノーテン罰符**: `noten_penalty_effect()` 追加
+- **`_opponent_wind()`/`_threat_of()`**: 風コンテキストを自動的に渡すヘルパー
+
+### push_fold.py
+- **受入枚数統合**: `evaluate_push_fold` に `acceptance_count` パラメータ追加
+- **良形/悪形テンパイ区別**: `good_shape`（8枚以上）/`bad_shape`（4枚以下）で分岐
+  - 悪形テンパイ×安手×極端な脅威 → わずかに safety_weight 付与
+  - イーシャンテンでも良形なら safety_weight を引き下げ
+  - リャンシャンテンの中盤で良形＋高打点 → より攻撃的に
+
+### placement_strategy.py
+- **ダマテン判定強化**: `should_damaten` に `acceptance_count` 追加
+  - 悪形ダマ（出アガリ率低い）→ リーチ優先（裏ドラ期待＋威嚇）
+  - 終盤（14巡目以降）→ ダマのメリット薄い（残り巡目が少ない）
+  - 跳満以上でも悪形なら安易にダマにしない
+- **直撃条件**: オーラス2位で1位への直撃ロンが安い翻数で可能な場合の分岐追加
+- **ノーテン罰符リスク**: オーラス1位で差が3000点以内 → テンパイ維持を重視
+
+### strategy_engine.py
+- **Q値比較バグ修正**: リーチ判定の比率ベース(`riichi_q * 0.90`)を差分ベース(`q_diff`)に変更。負のQ値で正しく動作
+- **副露判断も差分ベースに**: チー/ポンの Q値比較を差分ベースに統一
+- **現物（現物）優先**: `_find_genbutsu_discard()` 追加。FOLD/CAUTIOUS時にリーチ者の河にある牌を最優先
+  - FOLD + safety_weight >= 0.50 → 現物があれば無条件で現物
+  - CAUTIOUS → Q値差が小さければ現物
+- **パス上書き**: `_check_pass_override()` 追加。Mortal がパスした副露を順位状況で上書き
+  - オーラス4位 + meld_multiplier >= 1.1 → Q値差0.15以内なら副露
+  - オーラス3位 + 4位が近い → Q値差0.08以内なら副露
+- **安全上限引き上げ**: FOLD時の `safety_weight` 上限を 0.80 → 1.0 に。ベタオリ時は安全度100%を許容
+- **受入枚数の配線**: `estimate_acceptance_count()` を呼び出し `evaluate_push_fold` と `should_damaten` に渡す

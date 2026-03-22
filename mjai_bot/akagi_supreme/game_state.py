@@ -172,14 +172,36 @@ class PlayerInfo:
         """
         return self._consecutive_tsumogiri >= 3 and self._tedashi_count > 0
 
-    def apparent_threat_level(self, current_turn: int = 0) -> float:
+    def detect_honitsu_from_river(self) -> Optional[str]:
+        """Detect honitsu tendency from river discards (works for closed hands too).
+
+        If a player discards 2 suits heavily while keeping 1 suit,
+        they're likely going for honitsu/chinitsu.
+        """
+        river_counts = self.river_suit_counts()
+        total_number = river_counts["m"] + river_counts["p"] + river_counts["s"]
+        if total_number < 6:
+            return None  # not enough data
+
+        for target in ("m", "p", "s"):
+            others = sum(v for k, v in river_counts.items() if k != target and k != "z")
+            if others >= total_number * 0.75:
+                return target
+        return None
+
+    def apparent_threat_level(self, current_turn: int = 0,
+                              round_wind: str = "E",
+                              seat_wind: str = "E") -> float:
         """Heuristic threat level from discards, melds, and behavioral patterns.
 
         Enhanced with:
         - Tedashi pattern reading (tsumogiri streak → tedashi = tenpai signal)
-        - Suit bias in river (honitsu/chinitsu detection)
+        - Suit bias in river (honitsu/chinitsu detection for open AND closed hands)
         - Toitoi signal
         - Turn-aware riichi assessment
+        - Wind yakuhai detection (seat wind, round wind)
+        - Compound dragon detection (小三元 potential)
+        - Hand-cut content analysis (middle tiles = stronger hand signal)
         """
         threat = 0.0
 
@@ -194,17 +216,28 @@ class PlayerInfo:
         # === Open hand threats ===
         if self.is_open():
             n = self.num_melds()
-            # Yakuhai pon
             yakuhai_count = 0
+            dragon_count = 0
             for m in self.melds:
-                if m.meld_type == "pon" and len(m.tiles) > 0 and tile_base(m.tiles[0]) in YAKUHAI_HONORS:
-                    yakuhai_count += 1
-                    threat += 0.6
+                if m.meld_type == "pon" and len(m.tiles) > 0:
+                    t = tile_base(m.tiles[0])
+                    if t in YAKUHAI_HONORS:  # 白發中
+                        yakuhai_count += 1
+                        dragon_count += 1
+                        threat += 0.6
+                    elif t == round_wind or t == seat_wind:
+                        yakuhai_count += 1
+                        threat += 0.5  # wind yakuhai
+
             # Double yakuhai
             if yakuhai_count >= 2:
                 threat += 0.4
 
-            # Honitsu/Chinitsu signal
+            # Small three dragons potential (小三元)
+            if dragon_count >= 2:
+                threat += 0.6
+
+            # Honitsu/Chinitsu signal (open hand)
             target_suit = self.detect_honitsu_chinitsu()
             if target_suit is not None:
                 threat += 0.8 if n >= 3 else 0.5
@@ -219,9 +252,28 @@ class PlayerInfo:
             elif n >= 2:
                 threat += 0.3
 
+        # === Closed hand honitsu detection from river ===
+        if not self.is_open() and not self.riichi_declared:
+            river_honitsu = self.detect_honitsu_from_river()
+            if river_honitsu is not None:
+                threat += 0.4
+
         # === Tedashi pattern: tsumogiri streak then tedashi = tenpai signal ===
         if not self.riichi_declared and self.tedashi_after_tsumogiri_streak():
             threat += 0.6
+
+        # === Hand-cut content analysis ===
+        # Discarding middle tiles (3-7) from hand = stronger hand signal
+        if not self.riichi_declared:
+            hand_cuts = self.hand_cut_tiles()
+            if len(hand_cuts) >= 3:
+                mid_count = 0
+                for t in hand_cuts[-4:]:  # check recent hand-cuts
+                    s, r, _ = parse_tile(t)
+                    if r is not None and 3 <= r <= 7:
+                        mid_count += 1
+                if mid_count >= 2:
+                    threat += 0.3  # discarding valuable middle tiles = hand is strong
 
         # === Mid-to-late game with few discards from hand = holding hand ===
         if current_turn >= 10 and not self.riichi_declared and not self.is_open():
@@ -262,6 +314,7 @@ class GameState:
 
     # Tracking
     _initialized: bool = False
+    _is_tonpu: bool = False  # True for east-only (東風戦)
 
     def reset_round(self) -> None:
         self.turn = 0
@@ -338,7 +391,12 @@ class GameState:
 
     @property
     def is_all_last(self) -> bool:
-        """Are we in the final round (South 4 / オーラス)?"""
+        """Are we in the final round (オーラス)?
+
+        Handles both east-only (東風戦: E4) and east-south (半荘: S4).
+        """
+        if self._is_tonpu:
+            return self.round_wind == "E" and self.round_number == 4
         return self.round_wind == "S" and self.round_number == 4
 
     @property
@@ -347,6 +405,8 @@ class GameState:
 
     @property
     def is_late_game(self) -> bool:
+        if self._is_tonpu:
+            return self.round_wind == "E" and self.round_number >= 3
         return self.is_south and self.round_number >= 3
 
     @property
@@ -464,13 +524,23 @@ class GameState:
             return True
         return False
 
+    def _opponent_wind(self, seat: int) -> str:
+        """Get a player's seat wind."""
+        winds = ["E", "S", "W", "N"]
+        return winds[(seat - self.dealer) % 4]
+
+    def _threat_of(self, seat: int) -> float:
+        """Get threat level of a specific player with full context."""
+        return self.players[seat].apparent_threat_level(
+            self.turn, self.round_wind, self._opponent_wind(seat))
+
     def threat_level_total(self) -> float:
         """Sum of all opponents' threat levels."""
-        return sum(self.players[i].apparent_threat_level(self.turn)
+        return sum(self._threat_of(i)
                    for i in range(4) if i != self.player_id)
 
     def max_opponent_threat(self) -> float:
-        return max((self.players[i].apparent_threat_level(self.turn)
+        return max((self._threat_of(i)
                     for i in range(4) if i != self.player_id), default=0.0)
 
     def highest_threat_player(self) -> Optional[int]:
@@ -480,7 +550,7 @@ class GameState:
         for i in range(4):
             if i == self.player_id:
                 continue
-            t = self.players[i].apparent_threat_level(self.turn)
+            t = self._threat_of(i)
             if t > best_t:
                 best_t = t
                 best_i = i
@@ -509,27 +579,62 @@ class GameState:
             diff += 100  # need to strictly exceed for seat tiebreak
         return max(0, diff)
 
-    def min_han_for_points(self, target_points: int, is_tsumo: bool = False) -> int:
-        """Rough estimate: minimum han needed to reach target_points.
+    def min_han_for_points(self, target_points: int, is_tsumo: bool = False,
+                           fu: int = 30) -> int:
+        """Minimum han needed to reach target_points.
 
-        Uses 30fu as baseline.
+        Uses actual point calculation with configurable fu (default 30).
+        Common fu values: 20 (pinfu tsumo), 25 (chiitoitsu), 30, 40, 50.
         """
         if target_points <= 0:
             return 1
-        # Point table (30fu, non-dealer ron)
-        # 1 han: 1000, 2 han: 2000, 3 han: 3900, 4 han: 7700,
-        # 5+ (mangan): 8000, 6-7 (haneman): 12000, 8-10 (baiman): 16000
-        ron_points = [0, 1000, 2000, 3900, 7700, 8000, 12000, 12000, 16000, 16000, 16000]
-        tsumo_total = [0, 1300, 2600, 5200, 8000, 8000, 12000, 12000, 16000, 16000, 16000]
-        if self.is_dealer_me:
-            ron_points = [0, 1500, 2900, 5800, 11600, 12000, 18000, 18000, 24000, 24000, 24000]
-            tsumo_total = [0, 2000, 3900, 7700, 12000, 12000, 18000, 18000, 24000, 24000, 24000]
-
-        pts = tsumo_total if is_tsumo else ron_points
-        for han in range(1, len(pts)):
-            if pts[han] >= target_points:
+        for han in range(1, 14):
+            pts = _calculate_points(han, fu, self.is_dealer_me, is_tsumo)
+            if pts >= target_points:
                 return han
-        return 11  # beyond baiman
+        return 13  # yakuman
+
+    def points_needed_direct_hit(self, target_seat: int, target_placement: int) -> int:
+        """Points needed via direct hit (ron) on target_seat to reach target_placement.
+
+        Direct hit transfers points: target loses what we gain (+ honba).
+        This means we need less than half the raw point difference.
+        """
+        target_score = self.players[target_seat].score
+        # Find the score of the player at target_placement
+        sorted_scores = sorted(
+            [(p.score, i) for i, p in enumerate(self.players)],
+            key=lambda x: (-x[0], x[1])
+        )
+        if target_placement < 1 or target_placement > 4:
+            return 0
+        threshold_score = sorted_scores[target_placement - 1][0]
+        threshold_seat = sorted_scores[target_placement - 1][1]
+
+        my_s = self.my_score
+        if my_s >= threshold_score and self.my_placement <= target_placement:
+            return 0
+
+        # Direct hit: we gain X points, target loses X points
+        # New scores: my_s + X >= threshold, target_score - X (may drop)
+        # We need: my_s + X > threshold_score (or >= with seat priority)
+        needed = threshold_score - my_s
+        if self.player_id > threshold_seat:
+            needed += 100
+        return max(0, needed)
+
+    def noten_penalty_effect(self) -> int:
+        """Estimate point change from noten penalty (ノーテン罰符) at ryukyoku.
+
+        Returns negative value if we'd lose points (noten), positive if we'd gain.
+        Assumes we are noten; actual tenpai status should be checked by caller.
+        """
+        # Noten penalty: 3000 pts split among tenpai/noten players
+        # Worst case (only we are noten): -3000
+        # If 2 noten: -1500 each, 1 tenpai gets 3000
+        # If 3 noten: -1000 each, 1 tenpai gets 3000
+        # Conservative estimate: assume we're the only noten
+        return -3000
 
     # === Event processing ===
 
@@ -572,6 +677,9 @@ class GameState:
     def _handle_start_kyoku(self, event: dict) -> None:
         self.reset_round()
         self.round_wind = event.get("bakaze", "E")
+        # Detect east-south game (if we ever see south wind, it's not tonpu)
+        if self.round_wind == "S":
+            self._is_tonpu = False
         self.round_number = event.get("kyoku", 1)
         self.honba = event.get("honba", 0)
         self.kyotaku = event.get("kyotaku", 0)
@@ -719,3 +827,63 @@ def _hand_to_34(hand: List[Tile]) -> List[int]:
         if 0 <= idx < 34:
             counts[idx] += 1
     return counts
+
+
+def _ceil100(n: int) -> int:
+    """Round up to nearest 100."""
+    return ((n + 99) // 100) * 100
+
+
+def _calculate_points(han: int, fu: int, is_dealer: bool, is_tsumo: bool) -> int:
+    """Calculate points from han and fu using standard Mahjong point tables.
+
+    Handles all fu values (20, 25, 30, 40, 50, etc.) and mangan+ thresholds.
+    """
+    # Mangan and above: fixed values
+    if han >= 13:
+        return 48000 if is_dealer else 32000  # yakuman
+    if han >= 11:
+        return 36000 if is_dealer else 24000  # sanbaiman
+    if han >= 8:
+        return 24000 if is_dealer else 16000  # baiman
+    if han >= 6:
+        return 18000 if is_dealer else 12000  # haneman
+    if han >= 5:
+        return 12000 if is_dealer else 8000  # mangan
+
+    # Chiitoitsu special case (25fu fixed, 2han minimum)
+    if fu == 25:
+        if han < 2:
+            han = 2
+        basic = 25 * (2 ** (han + 2))
+        if basic >= 2000:
+            return 12000 if is_dealer else 8000
+        if is_dealer:
+            if is_tsumo:
+                per = _ceil100(basic * 2)
+                return per * 3
+            return _ceil100(basic * 6)
+        if is_tsumo:
+            ko = _ceil100(basic)
+            oya = _ceil100(basic * 2)
+            return ko * 2 + oya
+        return _ceil100(basic * 4)
+
+    # Standard calculation
+    basic = fu * (2 ** (han + 2))
+
+    # Mangan cap
+    if basic >= 2000:
+        return 12000 if is_dealer else 8000
+
+    if is_dealer:
+        if is_tsumo:
+            per = _ceil100(basic * 2)
+            return per * 3
+        return _ceil100(basic * 6)
+
+    if is_tsumo:
+        ko = _ceil100(basic)
+        oya = _ceil100(basic * 2)
+        return ko * 2 + oya
+    return _ceil100(basic * 4)

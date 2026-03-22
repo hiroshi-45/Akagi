@@ -171,26 +171,42 @@ def estimate_risk_of_deal_in(gs: GameState) -> float:
     return base_risk
 
 
-def evaluate_push_fold(gs: GameState, shanten: int) -> PushFoldResult:
+def evaluate_push_fold(gs: GameState, shanten: int,
+                       acceptance_count: int = 0) -> PushFoldResult:
     """Main push/fold evaluation.
 
     Design: Top players almost never fold from tenpai or good iishanten.
     We use turn number as a continuous variable, not just remaining tiles.
+    acceptance_count: number of useful remaining tiles (from estimate_acceptance_count).
     """
     hand_value = estimate_hand_value(gs)
     risk = estimate_risk_of_deal_in(gs)
     threat = gs.max_opponent_threat()
     my_turn = gs.my_turn  # per-player turn (0-based)
 
+    # Classify shape quality based on acceptance count
+    # Good shape: >= 8 useful tiles, Bad shape: <= 4
+    good_shape = acceptance_count >= 8
+    bad_shape = acceptance_count > 0 and acceptance_count <= 4
+
     # === Tenpai: almost always push ===
     # Top players virtually never fold from tenpai.
+    # But bad-shape tenpai (e.g. penchan 4 tiles) is less pushable than
+    # good-shape tenpai (e.g. ryanmen 8 tiles) in extreme situations.
     if shanten <= 0:
-        if threat >= 3.5 and hand_value < 2000 and my_turn >= 12:
-            # Extreme case: triple riichi, cheap hand, very late
+        if threat >= 3.5 and hand_value < 2000 and my_turn >= 12 and bad_shape:
+            # Extreme case: triple riichi, cheap hand, very late, bad wait
             return PushFoldResult(
                 Decision.BALANCED, 0.6,
-                "tenpai but cheap hand vs extreme threat, very late",
-                safety_weight=0.08
+                "tenpai but cheap bad-shape vs extreme threat, very late",
+                safety_weight=0.10
+            )
+        if threat >= 2.5 and hand_value < 2000 and my_turn >= 14 and bad_shape:
+            # Very late, cheap bad-shape vs strong threats
+            return PushFoldResult(
+                Decision.BALANCED, 0.55,
+                "tenpai cheap bad-shape, very late, strong threats",
+                safety_weight=0.06
             )
         # Standard: push from tenpai
         return PushFoldResult(
@@ -217,10 +233,11 @@ def evaluate_push_fold(gs: GameState, shanten: int) -> PushFoldResult:
                     safety_weight=0.05
                 )
             if threat >= 1.5:
+                sw = 0.08 if good_shape else 0.12
                 return PushFoldResult(
                     Decision.BALANCED, 0.7,
                     "iishanten, riichi opponent, early-mid",
-                    safety_weight=0.10
+                    safety_weight=sw
                 )
             return PushFoldResult(
                 Decision.PUSH, 0.7,
@@ -230,22 +247,25 @@ def evaluate_push_fold(gs: GameState, shanten: int) -> PushFoldResult:
         else:
             # Late game iishanten
             if hand_value >= risk * 0.6:
+                sw = 0.08 if good_shape else 0.15
                 return PushFoldResult(
                     Decision.BALANCED, 0.65,
                     "iishanten, late but valuable hand",
-                    safety_weight=0.12
+                    safety_weight=sw
                 )
             if threat >= 2.0:
+                sw = 0.15 if good_shape else 0.22
                 return PushFoldResult(
                     Decision.BALANCED, 0.6,
                     "iishanten, late, multiple threats",
-                    safety_weight=0.18
+                    safety_weight=sw
                 )
             if threat >= 1.0:
+                sw = 0.12 if good_shape else 0.18
                 return PushFoldResult(
                     Decision.BALANCED, 0.65,
                     "iishanten, late, riichi opponent",
-                    safety_weight=0.15
+                    safety_weight=sw
                 )
             return PushFoldResult(
                 Decision.BALANCED, 0.65,
@@ -283,6 +303,12 @@ def evaluate_push_fold(gs: GameState, shanten: int) -> PushFoldResult:
                     safety_weight=0.30
                 )
             if threat >= 1.0:
+                if hand_value >= risk * 0.5 and good_shape:
+                    return PushFoldResult(
+                        Decision.BALANCED, 0.6,
+                        "ryanshanten, mid-game, riichi but valuable+connected",
+                        safety_weight=0.18
+                    )
                 if hand_value >= risk * 0.5:
                     return PushFoldResult(
                         Decision.BALANCED, 0.6,
