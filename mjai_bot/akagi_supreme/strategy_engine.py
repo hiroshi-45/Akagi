@@ -10,6 +10,12 @@ Wraps Mortal's neural network decisions with strategic overlays:
 
 The engine RESPECTS Mortal's Q-values as the primary signal and only
 adjusts when strategic context clearly demands it.
+
+Design principle: Minimize overrides. Mortal's NN already encodes
+most tactical knowledge. We only intervene for:
+- Placement-driven strategy changes (ラス回避, トップ取り)
+- All-last special logic
+- Clear defensive situations where NN may not weight placement enough
 """
 from __future__ import annotations
 
@@ -91,11 +97,17 @@ class StrategyEngine:
         if not self.gs._initialized:
             return mortal_action
 
+        # === CRITICAL: Always take winning moves first ===
+        # Check mask before checking mortal_action to prevent miss when
+        # Mortal returns IDX_NONE but hora is available.
+        if IDX_HORA < len(mask) and mask[IDX_HORA]:
+            return IDX_HORA
+
         # === Always take winning moves ===
         if mortal_action == IDX_HORA:
             return mortal_action
 
-        # === Always allow pass when Mortal says pass ===
+        # === Allow pass when Mortal says pass ===
         if mortal_action == IDX_NONE:
             return mortal_action
 
@@ -103,13 +115,6 @@ class StrategyEngine:
         pf_result = evaluate_push_fold(self.gs, self._last_shanten)
         pf_result = adjust_for_placement(pf_result, self.gs)
         p_adj = compute_placement_adjustment(self.gs)
-
-        # === Hora override: if we can win, check if we should ===
-        if mask[IDX_HORA] if IDX_HORA < len(mask) else False:
-            # Almost always take the win
-            # Exception: all-last 1st place with huge lead, tsumo might cause
-            # others to lose more? No, always take wins.
-            return IDX_HORA
 
         # === Riichi decision ===
         if mortal_action == IDX_REACH:
@@ -134,25 +139,21 @@ class StrategyEngine:
         """Decide whether to declare riichi or damaten."""
         hand_value = estimate_hand_value(self.gs)
 
-        # Check if damaten is strategically preferred (passes hand_value for cost analysis)
+        # Check if damaten is strategically preferred
         if should_damaten(self.gs, p_adj, hand_value=hand_value):
-            # Find the best discard instead of riichi
-            best_discard = self._find_best_discard(q_values, mask, safety_weight=0.0)
+            best_discard = self._find_best_discard(q_values, mask)
             if best_discard is not None:
                 return best_discard
-            # Fall back to riichi if no discard available
             return IDX_REACH
 
         # Apply riichi multiplier to Q-value comparison
         if p_adj.riichi_multiplier < 0.8:
-            # Strongly discouraged: compare adjusted Q-values
-            best_discard = self._find_best_discard(q_values, mask, safety_weight=0.0)
+            best_discard = self._find_best_discard(q_values, mask)
             if best_discard is not None:
                 riichi_q = q_values[IDX_REACH] if IDX_REACH < len(q_values) else float('-inf')
                 discard_q = q_values[best_discard]
-                # Require discard Q-value to be at least 85% of riichi Q-value
-                # (was 70% — too lenient, would damaten too often)
-                if discard_q >= riichi_q * 0.85:
+                # Only damaten if the discard Q-value is reasonably close to riichi
+                if discard_q >= riichi_q * 0.90:
                     return best_discard
 
         return IDX_REACH
@@ -165,22 +166,47 @@ class StrategyEngine:
         p_adj: PlacementAdjustment,
         pf_result: PushFoldResult,
     ) -> int:
-        """Decide whether to accept or decline a meld opportunity."""
-        if pf_result.decision == Decision.FOLD:
-            # In full fold mode: only accept pon/kan of safe tiles, skip chi
-            if mortal_action in {IDX_CHI_LOW, IDX_CHI_MID, IDX_CHI_HIGH}:
-                if mask[IDX_NONE] if IDX_NONE < len(mask) else False:
-                    return IDX_NONE  # pass on chi while folding
+        """Decide whether to accept or decline a meld opportunity.
 
-        # Apply meld multiplier
+        Enhanced with:
+        - Fold mode: skip chi, only allow defensive pon/kan
+        - Post-meld defense consideration (open hand = less safe tiles)
+        - Meld value assessment based on what the meld contributes
+        """
+        # In full fold mode: skip chi entirely, be cautious with pon
+        if pf_result.decision == Decision.FOLD:
+            if mortal_action in {IDX_CHI_LOW, IDX_CHI_MID, IDX_CHI_HIGH}:
+                if IDX_NONE < len(mask) and mask[IDX_NONE]:
+                    return IDX_NONE  # pass on chi while folding
+            # For pon in fold mode: only accept if Mortal strongly prefers it
+            if mortal_action == IDX_PON:
+                if IDX_NONE < len(mask) and mask[IDX_NONE]:
+                    pon_q = q_values[mortal_action]
+                    none_q = q_values[IDX_NONE]
+                    # Need significant Q-value advantage to pon while folding
+                    if pon_q < none_q + 0.1:
+                        return IDX_NONE
+
+        # Cautious mode: slight bias against chi (reduces defense)
+        if pf_result.decision == Decision.CAUTIOUS:
+            if mortal_action in {IDX_CHI_LOW, IDX_CHI_MID, IDX_CHI_HIGH}:
+                if IDX_NONE < len(mask) and mask[IDX_NONE]:
+                    chi_q = q_values[mortal_action]
+                    none_q = q_values[IDX_NONE]
+                    # Chi needs clear Q-value advantage in cautious mode
+                    adjusted_chi_q = chi_q * p_adj.meld_multiplier
+                    if none_q > adjusted_chi_q:
+                        return IDX_NONE
+
+        # Apply meld multiplier for general discouragement
         if p_adj.meld_multiplier < 0.85:
-            # Discouraged melding: compare Q-values
             meld_q = q_values[mortal_action]
-            none_q = q_values[IDX_NONE] if (IDX_NONE < len(q_values) and
-                                             (mask[IDX_NONE] if IDX_NONE < len(mask) else False)) else float('-inf')
-            adjusted_meld_q = meld_q * p_adj.meld_multiplier
-            if none_q > adjusted_meld_q:
-                return IDX_NONE
+            none_available = IDX_NONE < len(mask) and mask[IDX_NONE]
+            if none_available:
+                none_q = q_values[IDX_NONE]
+                adjusted_meld_q = meld_q * p_adj.meld_multiplier
+                if none_q > adjusted_meld_q:
+                    return IDX_NONE
 
         return mortal_action
 
@@ -194,10 +220,10 @@ class StrategyEngine:
     ) -> int:
         """Adjust tile discard selection with safety consideration."""
         safety_weight = pf_result.safety_weight + p_adj.extra_safety
-        safety_weight = max(0.0, min(0.85, safety_weight))
+        safety_weight = max(0.0, min(0.80, safety_weight))
 
         # If no safety concern, trust Mortal completely
-        if safety_weight <= 0.02:
+        if safety_weight <= 0.03:
             return mortal_action
 
         # Build safety context for danger evaluation
@@ -205,43 +231,50 @@ class StrategyEngine:
         if ctx is None:
             return mortal_action
 
+        # Collect available discard candidates
+        available = [idx for idx in DISCARD_INDICES
+                     if idx < len(mask) and mask[idx]]
+        if not available:
+            return mortal_action
+
         # Score each available discard: combined Q-value and safety
+        # Use robust normalization: percentile-based instead of min-max
+        q_vals = [q_values[idx] for idx in available]
+        q_vals_sorted = sorted(q_vals)
+        n = len(q_vals_sorted)
+        if n <= 1:
+            return mortal_action
+
+        # Use 10th and 90th percentile for robust normalization
+        q_low = q_vals_sorted[max(0, n // 10)]
+        q_high = q_vals_sorted[min(n - 1, n - 1 - n // 10)]
+        q_range = max(q_high - q_low, 0.01)
+
         candidates = []
-        q_max = max(q_values[i] for i in range(len(q_values)) if i in DISCARD_INDICES and
-                     (mask[i] if i < len(mask) else False))
-        q_min = min(q_values[i] for i in range(len(q_values)) if i in DISCARD_INDICES and
-                     (mask[i] if i < len(mask) else False))
-        q_range = max(q_max - q_min, 0.01)
-
-        for idx in DISCARD_INDICES:
-            if idx >= len(mask) or not mask[idx]:
-                continue
-
+        for idx in available:
             tile_name = ACTION_TILE_NAMES[idx]
             danger = aggregate_danger(tile_name, ctx)
-            safety = 1.0 - min(danger / 1.8, 1.0)  # normalize 0-1
+            # Normalize danger to 0-1 using context-aware max
+            # Riichi present: max danger ~ 1.8; no riichi: max ~ 1.2
+            max_danger = 1.8 if any(ctx.riichi_flags) else 1.2
+            safety = 1.0 - min(danger / max_danger, 1.0)
 
-            # Normalize Q-value to 0-1 range
-            q_norm = (q_values[idx] - q_min) / q_range
+            # Robust Q-value normalization
+            q_norm = max(0.0, min(1.0, (q_values[idx] - q_low) / q_range))
 
-            # Combined score
             combined = (1.0 - safety_weight) * q_norm + safety_weight * safety
-            candidates.append((idx, combined, q_norm, safety, danger))
+            candidates.append((idx, combined))
 
         if not candidates:
             return mortal_action
 
-        # Sort by combined score
         candidates.sort(key=lambda x: x[1], reverse=True)
-        best_idx = candidates[0][0]
-
-        return best_idx
+        return candidates[0][0]
 
     def _find_best_discard(
         self,
         q_values: List[float],
         mask: List[bool],
-        safety_weight: float,
     ) -> Optional[int]:
         """Find the best discard action by Q-value."""
         best_idx = None
