@@ -304,6 +304,77 @@ class TestThreePlayerDetectionPersistence:
 # Dealer base value correction test
 # ============================================================
 
+class TestDoubleRiichiRisk:
+    """Test that double riichi risk calculation applies individual bonuses."""
+
+    def _make_gs(self, **kwargs) -> GameState:
+        gs = GameState()
+        gs._initialized = True
+        gs.player_id = kwargs.get("player_id", 0)
+        gs.dealer = kwargs.get("dealer", 1)
+        gs.turn = kwargs.get("turn", 20)
+        gs.num_players = 4
+        gs.my_hand = ["1m"] * 13
+        gs.players = [PlayerInfo() for _ in range(4)]
+        if "scores" in kwargs:
+            for i, s in enumerate(kwargs["scores"]):
+                gs.players[i].score = s
+        return gs
+
+    def test_double_riichi_plain_unchanged(self):
+        """Double non-dealer non-early riichi should still use 1.8x base."""
+        from mjai_bot.akagi_supreme.push_fold import estimate_risk_of_deal_in
+        gs = self._make_gs()
+        gs.players[1].riichi_declared = True
+        gs.players[1].riichi_turn = 8  # late riichi
+        gs.players[2].riichi_declared = True
+        gs.players[2].riichi_turn = 9  # late riichi
+        risk = estimate_risk_of_deal_in(gs)
+        # 5200 * 1.8 = 9360 (no dealer/early bonuses)
+        assert abs(risk - 9360) < 100, f"Double plain riichi risk should be ~9360, got {risk}"
+
+    def test_double_riichi_dealer_bonus(self):
+        """Double riichi with one dealer should be higher than plain double riichi."""
+        from mjai_bot.akagi_supreme.push_fold import estimate_risk_of_deal_in
+        gs_plain = self._make_gs()
+        gs_plain.players[1].riichi_declared = True
+        gs_plain.players[1].riichi_turn = 8
+        gs_plain.players[2].riichi_declared = True
+        gs_plain.players[2].riichi_turn = 9
+        risk_plain = estimate_risk_of_deal_in(gs_plain)
+
+        gs_dealer = self._make_gs(dealer=1)
+        gs_dealer.players[1].riichi_declared = True
+        gs_dealer.players[1].riichi_turn = 8
+        gs_dealer.players[1].is_dealer = True
+        gs_dealer.players[2].riichi_declared = True
+        gs_dealer.players[2].riichi_turn = 9
+        risk_dealer = estimate_risk_of_deal_in(gs_dealer)
+
+        assert risk_dealer > risk_plain, \
+            f"Dealer double riichi ({risk_dealer}) should be > plain double riichi ({risk_plain})"
+
+    def test_double_riichi_early_bonus(self):
+        """Double riichi with early declaration should be higher than late."""
+        from mjai_bot.akagi_supreme.push_fold import estimate_risk_of_deal_in
+        gs_late = self._make_gs()
+        gs_late.players[1].riichi_declared = True
+        gs_late.players[1].riichi_turn = 8
+        gs_late.players[2].riichi_declared = True
+        gs_late.players[2].riichi_turn = 9
+        risk_late = estimate_risk_of_deal_in(gs_late)
+
+        gs_early = self._make_gs()
+        gs_early.players[1].riichi_declared = True
+        gs_early.players[1].riichi_turn = 3  # early
+        gs_early.players[2].riichi_declared = True
+        gs_early.players[2].riichi_turn = 5  # early
+        risk_early = estimate_risk_of_deal_in(gs_early)
+
+        assert risk_early > risk_late, \
+            f"Early double riichi ({risk_early}) should be > late double riichi ({risk_late})"
+
+
 class TestDealerBaseValue:
     """Verify dealer hand value estimate is reasonable."""
 

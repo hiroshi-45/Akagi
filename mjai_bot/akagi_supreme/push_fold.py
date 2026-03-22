@@ -200,7 +200,18 @@ def estimate_risk_of_deal_in(gs: GameState) -> float:
     # two independent threats means many more tiles are dangerous.
     n_riichi = gs.num_riichi_opponents
     if n_riichi >= 2:
+        # Double riichi base: many more tiles are dangerous.
         base_risk *= 1.8
+        # Additionally apply individual threat factors (reduced multipliers
+        # since the 1.8 base already captures dual-threat danger).
+        # Without this, dealer riichi + non-dealer riichi is rated the same
+        # as two non-dealer riichis, which underestimates the risk.
+        for i, p in enumerate(gs.players):
+            if i != gs.player_id and p.riichi_declared:
+                if p.is_dealer:
+                    base_risk *= 1.3  # dealer deal-in cost is higher
+                if p.riichi_turn <= 6:
+                    base_risk *= 1.1  # early riichi = stronger hand
     elif n_riichi == 1:
         for i, p in enumerate(gs.players):
             if i != gs.player_id and p.riichi_declared:
