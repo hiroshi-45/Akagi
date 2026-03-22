@@ -21,6 +21,7 @@ Design principles:
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from ..strategy.safety import (
@@ -41,12 +42,7 @@ from akagi.logging_utils import setup_logger
 logger = setup_logger("akagi_supreme_strategy")
 
 
-# Action type indices in the 46-action space
-# 0-33: tile discards (1m-9m, 1p-9p, 1s-9s, E,S,W,N,P,F,C)
-# 34-36: red five discards (5mr, 5pr, 5sr)
-# 37: reach, 38: chi_low, 39: chi_mid, 40: chi_high
-# 41: pon, 42: kan_select, 43: hora, 44: ryukyoku, 45: none
-
+# Action tile names (shared between 4P and 3P — tiles 0-36 are the same)
 ACTION_TILE_NAMES = [
     "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m",
     "1p", "2p", "3p", "4p", "5p", "6p", "7p", "8p", "9p",
@@ -55,18 +51,54 @@ ACTION_TILE_NAMES = [
     "5mr", "5pr", "5sr",
 ]
 
-IDX_REACH = 37
+DISCARD_INDICES = set(range(37))  # 0-36 are all tile discards
+
+
+@dataclass
+class ActionConfig:
+    """Action index configuration for different player counts.
+
+    4P action space (46): 0-36 tiles, 37 reach, 38-40 chi, 41 pon, 42 kan,
+                          43 hora, 44 ryukyoku, 45 none
+    3P action space (44): 0-36 tiles, 37 reach, 38 pon, 39 kan,
+                          40 hora, 41 ryukyoku, 42 none, 43 kita
+    """
+    idx_reach: int
+    idx_pon: int
+    idx_kan: int
+    idx_hora: int
+    idx_ryukyoku: int
+    idx_none: int
+    chi_indices: frozenset
+    meld_indices: frozenset = field(init=False)
+
+    def __post_init__(self):
+        self.meld_indices = self.chi_indices | {self.idx_pon, self.idx_kan}
+
+
+ACTION_CONFIG_4P = ActionConfig(
+    idx_reach=37, idx_pon=41, idx_kan=42, idx_hora=43,
+    idx_ryukyoku=44, idx_none=45,
+    chi_indices=frozenset({38, 39, 40}),
+)
+
+ACTION_CONFIG_3P = ActionConfig(
+    idx_reach=37, idx_pon=38, idx_kan=39, idx_hora=40,
+    idx_ryukyoku=41, idx_none=42,
+    chi_indices=frozenset(),  # no chi in 3-player mahjong
+)
+
+# Default aliases for backwards compatibility (4P)
+IDX_REACH = ACTION_CONFIG_4P.idx_reach
 IDX_CHI_LOW = 38
 IDX_CHI_MID = 39
 IDX_CHI_HIGH = 40
-IDX_PON = 41
-IDX_KAN = 42
-IDX_HORA = 43
-IDX_RYUKYOKU = 44
-IDX_NONE = 45
-
-DISCARD_INDICES = set(range(37))  # 0-36 are all tile discards
-MELD_INDICES = {IDX_CHI_LOW, IDX_CHI_MID, IDX_CHI_HIGH, IDX_PON, IDX_KAN}
+IDX_PON = ACTION_CONFIG_4P.idx_pon
+IDX_KAN = ACTION_CONFIG_4P.idx_kan
+IDX_HORA = ACTION_CONFIG_4P.idx_hora
+IDX_RYUKYOKU = ACTION_CONFIG_4P.idx_ryukyoku
+IDX_NONE = ACTION_CONFIG_4P.idx_none
+MELD_INDICES = ACTION_CONFIG_4P.meld_indices
 
 # Safety thresholds for tile categorization
 DANGER_SAFE = 0.25      # genbutsu-level safe
@@ -77,9 +109,10 @@ DANGER_HIGH = 1.0       # dangerous
 class StrategyEngine:
     """Applies strategic overlays to Mortal's raw action selection."""
 
-    def __init__(self):
+    def __init__(self, action_config: ActionConfig = None):
         self.gs = GameState()
         self._last_shanten: int = 6
+        self.ac = action_config or ACTION_CONFIG_4P
 
     def process_event(self, event: dict) -> None:
         """Update internal game state from MJAI event."""
@@ -110,10 +143,12 @@ class StrategyEngine:
         if not self.gs._initialized:
             return mortal_action
 
+        ac = self.ac
+
         # === Hora: respect Mortal's decision ===
         # If Mortal chose hora, take it. If Mortal chose NOT to take hora
         # despite it being available, respect that (着順 reasons).
-        if mortal_action == IDX_HORA:
+        if mortal_action == ac.idx_hora:
             return mortal_action
 
         # === Evaluate strategic context ===
@@ -123,18 +158,18 @@ class StrategyEngine:
         p_adj = compute_placement_adjustment(self.gs)
 
         # === Pass override: check if we should meld when Mortal passes ===
-        if mortal_action == IDX_NONE:
+        if mortal_action == ac.idx_none:
             override = self._check_pass_override(q_values, mask, p_adj, pf_result)
             if override is not None:
                 return override
             return mortal_action
 
         # === Riichi decision ===
-        if mortal_action == IDX_REACH:
+        if mortal_action == ac.idx_reach:
             return self._adjust_riichi(q_values, mask, p_adj, acceptance)
 
         # === Meld decisions (chi/pon/kan) ===
-        if mortal_action in MELD_INDICES:
+        if mortal_action in ac.meld_indices:
             return self._adjust_meld(mortal_action, q_values, mask, p_adj, pf_result)
 
         # === Discard decisions ===
@@ -163,19 +198,21 @@ class StrategyEngine:
         if gs.my_placement <= 1:
             return None
 
-        available_melds = [idx for idx in MELD_INDICES
+        ac = self.ac
+        available_melds = [idx for idx in ac.meld_indices
                            if idx < len(mask) and mask[idx]]
         if not available_melds:
             return None
 
         best_meld = max(available_melds, key=lambda idx: q_values[idx])
-        none_q = q_values[IDX_NONE] if IDX_NONE < len(q_values) else 0.0
+        none_q = q_values[ac.idx_none] if ac.idx_none < len(q_values) else 0.0
         meld_q = q_values[best_meld]
 
-        # All-last 4th: aggressively consider melding (worst placement,
-        # nothing to lose). Top players take almost any meld here.
+        # All-last 4th: take almost any meld (worst placement, nothing to
+        # lose). Top players know 4th is already the worst outcome, so any
+        # chance to speed up the hand is worth taking.
         if gs.my_placement == 4:
-            if meld_q >= none_q - 0.25:
+            if meld_q >= none_q - 0.45:
                 return best_meld
 
         # All-last 3rd with 4th close: need speed to stay safe
@@ -209,6 +246,7 @@ class StrategyEngine:
         acceptance_count: int = 0,
     ) -> int:
         """Decide whether to declare riichi or damaten."""
+        ac = self.ac
         hand_value = estimate_hand_value(self.gs)
 
         if should_damaten(self.gs, p_adj, hand_value=hand_value,
@@ -216,19 +254,19 @@ class StrategyEngine:
             best_discard = self._find_best_discard(q_values, mask)
             if best_discard is not None:
                 return best_discard
-            return IDX_REACH
+            return ac.idx_reach
 
         # Apply riichi multiplier to Q-value comparison
         if p_adj.riichi_multiplier < 0.8:
             best_discard = self._find_best_discard(q_values, mask)
             if best_discard is not None:
-                riichi_q = q_values[IDX_REACH] if IDX_REACH < len(q_values) else float('-inf')
+                riichi_q = q_values[ac.idx_reach] if ac.idx_reach < len(q_values) else float('-inf')
                 discard_q = q_values[best_discard]
                 q_diff = riichi_q - discard_q
                 if q_diff < 0.05:
                     return best_discard
 
-        return IDX_REACH
+        return ac.idx_reach
 
     def _adjust_meld(
         self,
@@ -246,9 +284,10 @@ class StrategyEngine:
         - Placement-driven meld encouragement
         """
         gs = self.gs
+        ac = self.ac
 
         # === Always accept yakuhai pon (役牌ポン) ===
-        if mortal_action == IDX_PON:
+        if mortal_action == ac.idx_pon:
             # Check if the pon target is a yakuhai
             # We infer from Mortal choosing pon — check if it's a yakuhai tile
             # by looking at what tile was just discarded (most recent in an
@@ -263,41 +302,99 @@ class StrategyEngine:
                 if base in gs.doras or pon_tile.endswith("r"):
                     return mortal_action  # always pon dora
 
+        # === Menzen loss evaluation (門前維持価値) ===
+        # When hand is closed and near tenpai, melding loses riichi eligibility.
+        # Penalize meld unless the Q-value advantage is strong enough to
+        # compensate for the lost option value of declaring riichi.
+        if not gs.my_melds and ac.idx_none < len(mask) and mask[ac.idx_none]:
+            menzen_penalty = self._evaluate_menzen_loss(mortal_action)
+            if menzen_penalty > 0.0:
+                meld_q = q_values[mortal_action]
+                none_q = q_values[ac.idx_none]
+                # Require meld Q-value to exceed pass by the menzen penalty
+                if meld_q < none_q + menzen_penalty:
+                    return ac.idx_none
+
         # === In FOLD: skip chi entirely, very cautious with pon ===
         if pf_result.decision == Decision.FOLD:
-            if mortal_action in {IDX_CHI_LOW, IDX_CHI_MID, IDX_CHI_HIGH}:
-                if IDX_NONE < len(mask) and mask[IDX_NONE]:
-                    return IDX_NONE
-            if mortal_action == IDX_PON:
-                if IDX_NONE < len(mask) and mask[IDX_NONE]:
+            if mortal_action in ac.chi_indices:
+                if ac.idx_none < len(mask) and mask[ac.idx_none]:
+                    return ac.idx_none
+            if mortal_action == ac.idx_pon:
+                if ac.idx_none < len(mask) and mask[ac.idx_none]:
                     pon_q = q_values[mortal_action]
-                    none_q = q_values[IDX_NONE]
+                    none_q = q_values[ac.idx_none]
                     if pon_q < none_q + 0.15:
-                        return IDX_NONE
+                        return ac.idx_none
 
         # === In MAWASHI: slight bias against chi ===
         if pf_result.decision == Decision.MAWASHI:
-            if mortal_action in {IDX_CHI_LOW, IDX_CHI_MID, IDX_CHI_HIGH}:
-                if IDX_NONE < len(mask) and mask[IDX_NONE]:
+            if mortal_action in ac.chi_indices:
+                if ac.idx_none < len(mask) and mask[ac.idx_none]:
                     chi_q = q_values[mortal_action]
-                    none_q = q_values[IDX_NONE]
+                    none_q = q_values[ac.idx_none]
                     q_diff = chi_q - none_q
                     threshold = 0.05 if p_adj.meld_multiplier >= 1.0 else 0.10
                     if q_diff < threshold:
-                        return IDX_NONE
+                        return ac.idx_none
 
         # Apply meld multiplier for general discouragement
         if p_adj.meld_multiplier < 0.85:
             meld_q = q_values[mortal_action]
-            none_available = IDX_NONE < len(mask) and mask[IDX_NONE]
+            none_available = ac.idx_none < len(mask) and mask[ac.idx_none]
             if none_available:
-                none_q = q_values[IDX_NONE]
+                none_q = q_values[ac.idx_none]
                 q_diff = meld_q - none_q
                 threshold = 0.05 * (1.0 - p_adj.meld_multiplier) / 0.15
                 if q_diff < threshold:
-                    return IDX_NONE
+                    return ac.idx_none
 
         return mortal_action
+
+    def _evaluate_menzen_loss(self, mortal_action: int) -> float:
+        """Evaluate the Q-value penalty for losing menzen (riichi option).
+
+        When the hand is closed and near tenpai, melding sacrifices:
+        1. Riichi declaration (ippatsu + ura dora + intimidation)
+        2. Menzen tsumo yaku
+        3. Higher scoring potential (pinfu, etc.)
+
+        Returns a Q-value threshold the meld must exceed to be worthwhile.
+        0.0 means no penalty (meld freely).
+        """
+        gs = self.gs
+        ac = self.ac
+
+        # Already has melds — no menzen to lose
+        if gs.my_melds:
+            return 0.0
+
+        # Chi breaks menzen more than pon in terms of hand structure options
+        is_chi = mortal_action in ac.chi_indices
+
+        # Shanten-based penalty: closer to tenpai = bigger cost of melding
+        shanten = self._last_shanten
+
+        if shanten <= 0:
+            # Already tenpai menzen — very high cost to break it
+            # (loses riichi option entirely)
+            return 0.20 if is_chi else 0.15
+
+        if shanten == 1:
+            # Iishanten menzen — moderate cost (close to riichi)
+            # Early game: riichi is very strong, penalize more
+            # Late game: speed matters more, penalize less
+            if gs.my_turn <= 8:
+                return 0.10 if is_chi else 0.07
+            else:
+                return 0.05 if is_chi else 0.03
+
+        if shanten == 2:
+            # Ryanshanten — small cost, melding for speed is often fine
+            return 0.03 if is_chi else 0.01
+
+        # Far from tenpai — no meaningful menzen advantage
+        return 0.0
 
     def _adjust_discard(
         self,

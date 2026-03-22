@@ -367,6 +367,7 @@ class GameState:
     round_number: int = 1  # kyoku (1-based)
     honba: int = 0
     kyotaku: int = 0  # riichi sticks on table
+    num_players: int = 4  # 3 for sanma, 4 for normal
 
     # Round-level
     dealer: int = 0  # oya seat
@@ -394,7 +395,7 @@ class GameState:
 
     def reset_round(self) -> None:
         self.turn = 0
-        self.remaining_tiles = 70
+        self.remaining_tiles = 55 if self.num_players == 3 else 70
         self.my_hand = []
         self.my_tsumo = None
         self.dora_indicators = []
@@ -429,30 +430,44 @@ class GameState:
         return self.players[self.player_id].score
 
     @property
+    def my_melds(self) -> list:
+        """My open melds."""
+        return self.players[self.player_id].melds
+
+    @property
     def scores(self) -> List[int]:
         return [p.score for p in self.players]
 
     @property
+    def _active_players(self) -> List[int]:
+        """Indices of active players (excludes empty seats in 3p)."""
+        if self.num_players == 3:
+            return [i for i in range(4) if self.players[i].score > 0 or i == self.player_id][:3]
+        return list(range(4))
+
+    @property
     def my_placement(self) -> int:
-        """1 = first, 4 = last."""
+        """1 = first, num_players = last."""
         my_s = self.my_score
         rank = 1
-        for i, p in enumerate(self.players):
+        for i in self._active_players:
             if i != self.player_id:
-                if p.score > my_s or (p.score == my_s and i < self.player_id):
+                if self.players[i].score > my_s or (self.players[i].score == my_s and i < self.player_id):
                     rank += 1
         return rank
 
     @property
     def diff_to_first(self) -> int:
-        return max(p.score for p in self.players) - self.my_score
+        active = self._active_players
+        return max(self.players[i].score for i in active) - self.my_score
 
     @property
     def diff_to_above(self) -> int:
         """Point difference to the player directly above me."""
         my_s = self.my_score
-        above_scores = sorted([p.score for i, p in enumerate(self.players)
-                                if p.score > my_s or (p.score == my_s and i < self.player_id)],
+        active = self._active_players
+        above_scores = sorted([self.players[i].score for i in active
+                                if self.players[i].score > my_s or (self.players[i].score == my_s and i < self.player_id)],
                                reverse=True)
         if not above_scores:
             return 0
@@ -462,8 +477,9 @@ class GameState:
     def diff_to_below(self) -> int:
         """Point difference to the player directly below me."""
         my_s = self.my_score
-        below_scores = sorted([p.score for i, p in enumerate(self.players)
-                                if p.score < my_s or (p.score == my_s and i > self.player_id)])
+        active = self._active_players
+        below_scores = sorted([self.players[i].score for i in active
+                                if self.players[i].score < my_s or (self.players[i].score == my_s and i > self.player_id)])
         if not below_scores:
             return 0
         return my_s - below_scores[-1]
@@ -494,8 +510,9 @@ class GameState:
 
     @property
     def num_riichi_opponents(self) -> int:
-        return sum(1 for i, p in enumerate(self.players)
-                   if i != self.player_id and p.riichi_declared)
+        active = self._active_players
+        return sum(1 for i in active
+                   if i != self.player_id and self.players[i].riichi_declared)
 
     @property
     def riichi_flags(self) -> List[bool]:
@@ -517,7 +534,7 @@ class GameState:
     @property
     def my_turn(self) -> int:
         """Approximate per-player turn number (0-based)."""
-        return self.turn // 4
+        return self.turn // self.num_players
 
     def count_dora_in_hand(self) -> int:
         """Count dora tiles in my hand (fixed: no double-counting red dora)."""
@@ -548,28 +565,39 @@ class GameState:
         simulate adding it and removing each tile, checking if the resulting
         hand has better mentsu/partial-mentsu structure.
 
-        This is more accurate than "any connected tile" — it requires the
-        draw to actually improve the hand structure.
+        At tenpai (deficiency=1 for 13-tile hand), checks if drawing the tile
+        completes a 14-tile winning hand (deficiency=0) instead of the
+        draw-then-discard approach, which can never reduce a 13-tile hand
+        below deficiency 1 (since 4 mentsu + 1 pair requires exactly 14 tiles).
         """
         hand_counts = _hand_to_34(self.my_hand)
         current_deficiency = _estimate_deficiency(hand_counts)
         acceptance = 0
+        is_tenpai = (current_deficiency == 1 and len(self.my_hand) == 13)
 
         for idx in range(34):
             remaining = max(0, 4 - self.visible_counts[idx])
             if remaining <= 0:
                 continue
 
-            # Simulate drawing this tile
             hand_counts[idx] += 1
 
-            # Check if any discard reduces deficiency
+            if is_tenpai:
+                # At tenpai: check if the 14-tile hand is complete (agari)
+                if _estimate_deficiency(hand_counts) == 0:
+                    acceptance += remaining
+                    hand_counts[idx] -= 1
+                    continue
+                hand_counts[idx] -= 1
+                continue
+
+            # Non-tenpai: check if any discard reduces deficiency
             improved = False
             for discard_idx in range(34):
                 if hand_counts[discard_idx] <= 0:
                     continue
                 if discard_idx == idx and hand_counts[discard_idx] <= 1:
-                    continue  # can't discard the only copy we just drew
+                    continue
 
                 hand_counts[discard_idx] -= 1
                 new_deficiency = _estimate_deficiency(hand_counts)
@@ -585,6 +613,51 @@ class GameState:
                 acceptance += remaining
 
         return acceptance
+
+    def wait_tile_details(self) -> List[Tuple[int, int]]:
+        """Get per-tile unseen counts for estimated wait tiles.
+
+        Returns list of (tile_index, unseen_count) for each tile that would
+        improve the hand (reduce shanten/deficiency).
+
+        At tenpai, returns the actual winning tiles with their unseen counts.
+        """
+        hand_counts = _hand_to_34(self.my_hand)
+        current_deficiency = _estimate_deficiency(hand_counts)
+        result = []
+        is_tenpai = (current_deficiency == 1 and len(self.my_hand) == 13)
+
+        for idx in range(34):
+            remaining = max(0, 4 - self.visible_counts[idx])
+            if remaining <= 0:
+                continue
+
+            hand_counts[idx] += 1
+
+            if is_tenpai:
+                if _estimate_deficiency(hand_counts) == 0:
+                    result.append((idx, remaining))
+                hand_counts[idx] -= 1
+                continue
+
+            improved = False
+            for discard_idx in range(34):
+                if hand_counts[discard_idx] <= 0:
+                    continue
+                if discard_idx == idx and hand_counts[discard_idx] <= 1:
+                    continue
+                hand_counts[discard_idx] -= 1
+                new_deficiency = _estimate_deficiency(hand_counts)
+                hand_counts[discard_idx] += 1
+                if new_deficiency < current_deficiency:
+                    improved = True
+                    break
+            hand_counts[idx] -= 1
+
+            if improved:
+                result.append((idx, remaining))
+
+        return result
 
     def my_wind(self) -> str:
         """My seat wind."""
@@ -610,22 +683,25 @@ class GameState:
     def _threat_of(self, seat: int) -> float:
         """Get threat level of a specific player with full context."""
         return self.players[seat].apparent_threat_level(
-            self.turn, self.round_wind, self._opponent_wind(seat))
+            self.my_turn, self.round_wind, self._opponent_wind(seat))
 
     def threat_level_total(self) -> float:
         """Sum of all opponents' threat levels."""
+        active = self._active_players
         return sum(self._threat_of(i)
-                   for i in range(4) if i != self.player_id)
+                   for i in active if i != self.player_id)
 
     def max_opponent_threat(self) -> float:
+        active = self._active_players
         return max((self._threat_of(i)
-                    for i in range(4) if i != self.player_id), default=0.0)
+                    for i in active if i != self.player_id), default=0.0)
 
     def highest_threat_player(self) -> Optional[int]:
         """Return seat index of the most threatening opponent."""
+        active = self._active_players
         best_i = None
         best_t = 0.0
-        for i in range(4):
+        for i in active:
             if i == self.player_id:
                 continue
             t = self._threat_of(i)
@@ -641,11 +717,12 @@ class GameState:
 
         Returns the point deficit to overcome (0 if already at or above target).
         """
+        active = self._active_players
         sorted_scores = sorted(
-            [(p.score, i) for i, p in enumerate(self.players)],
+            [(self.players[i].score, i) for i in active],
             key=lambda x: (-x[0], x[1])
         )
-        if target_placement < 1 or target_placement > 4:
+        if target_placement < 1 or target_placement > len(active):
             return 0
         target_score, target_seat = sorted_scores[target_placement - 1]
         my_s = self.my_score
@@ -680,11 +757,12 @@ class GameState:
         """
         target_score = self.players[target_seat].score
         # Find the score of the player at target_placement
+        active = self._active_players
         sorted_scores = sorted(
-            [(p.score, i) for i, p in enumerate(self.players)],
+            [(self.players[i].score, i) for i in active],
             key=lambda x: (-x[0], x[1])
         )
-        if target_placement < 1 or target_placement > 4:
+        if target_placement < 1 or target_placement > len(active):
             return 0
         threshold_score = sorted_scores[target_placement - 1][0]
         threshold_seat = sorted_scores[target_placement - 1][1]
@@ -753,6 +831,12 @@ class GameState:
             self.reset_game()
 
     def _handle_start_kyoku(self, event: dict) -> None:
+        # Detect 3-player mode from scores before reset_round (affects wall size)
+        scores = event.get("scores", [25000] * 4)
+        if len(scores) == 4 and scores[3] == 0 and all(s > 0 for s in scores[:3]):
+            self.num_players = 3
+        else:
+            self.num_players = 4
         self.reset_round()
         self.round_wind = event.get("bakaze", "E")
         # Detect east-south game (if we ever see south wind, it's not tonpu)
@@ -763,7 +847,6 @@ class GameState:
         self.kyotaku = event.get("kyotaku", 0)
         self.dealer = event.get("oya", 0)
 
-        scores = event.get("scores", [25000] * 4)
         for i, s in enumerate(scores):
             self.players[i].score = s
             self.players[i].is_dealer = (i == self.dealer)
@@ -889,7 +972,10 @@ class GameState:
     def _handle_reach(self, event: dict) -> None:
         actor = event.get("actor", -1)
         self.players[actor].riichi_declared = True
-        self.players[actor].riichi_turn = self.turn
+        # Store per-player turn, not global turn counter.
+        # All downstream comparisons (apparent_threat_level, push_fold,
+        # safety.py) use thresholds calibrated to per-player turns (0-17).
+        self.players[actor].riichi_turn = self.turn // self.num_players
 
     def _handle_reach_accepted(self, event: dict) -> None:
         actor = event.get("actor", -1)

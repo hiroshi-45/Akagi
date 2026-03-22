@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-from .strategy_engine import StrategyEngine
+from .strategy_engine import StrategyEngine, ActionConfig
 
 from akagi.logging_utils import setup_logger
 
@@ -23,9 +23,9 @@ class SupremeEngine:
     can use it transparently.
     """
 
-    def __init__(self, base_engine):
+    def __init__(self, base_engine, action_config: ActionConfig = None):
         self.base_engine = base_engine
-        self.strategy = StrategyEngine()
+        self.strategy = StrategyEngine(action_config=action_config)
 
         # Forward all attributes from base engine that libriichi might access
         self.engine_type = 'mortal'

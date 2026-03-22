@@ -293,20 +293,60 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
                    acceptance_count: int = 0) -> bool:
     """Whether to consider damaten (hidden tenpai) over riichi.
 
-    Enhanced with:
-    - Wait tile remaining count (山残り): uses unseen_count for actual wait tiles
-    - Wait shape quality
-    - Turn awareness
+    Enhanced with tile-level wait analysis (山残り):
+    - Per-tile unseen counts determine wait quality more precisely
+    - Single-tile waits with 1 remaining copy → riichi for intimidation
+    - Multi-tile waits with good mountain → damaten viable
+    - Concentration ratio: if most acceptance is on 1 tile, it's fragile
+
+    Top player thinking on riichi vs damaten:
+    - Riichi: +1han, ura dora chance, intimidation, but costs 1000pts and locks hand
+    - Damaten: flexibility, can change wait, no information leak, can dodge
+    - Mountain remaining (山残り) is critical: few tiles left = riichi for intimidation
     """
     if not adj.prefer_damaten:
         return False
 
     my_turn = gs.my_turn
-    bad_wait = acceptance_count > 0 and acceptance_count <= 4
+
+    # === Get tile-level wait information ===
+    wait_details = gs.wait_tile_details()
+    num_wait_kinds = len(wait_details)  # how many different tiles we're waiting on
+    max_single_tile = max((cnt for _, cnt in wait_details), default=0) if wait_details else 0
+    total_remaining = sum(cnt for _, cnt in wait_details) if wait_details else acceptance_count
+
+    # Use tile-level data if available, fall back to acceptance_count
+    if total_remaining == 0 and acceptance_count > 0:
+        total_remaining = acceptance_count
+
+    bad_wait = total_remaining > 0 and total_remaining <= 4
 
     # === Very late game: damaten loses value ===
     if my_turn >= 14 and not (gs.is_all_last and gs.my_placement == 1):
         return False
+
+    # === Tile-level mountain analysis (山残り) ===
+    if total_remaining > 0:
+        # Single wait kind with only 1 copy left: riichi for intimidation
+        # (can't realistically tsumo, so threaten opponents into folding)
+        if num_wait_kinds == 1 and max_single_tile <= 1:
+            if not (gs.is_all_last and gs.my_placement == 1):
+                return False
+
+        # Multiple wait kinds but total <= 2: very thin overall
+        if total_remaining <= 2 and num_wait_kinds <= 2:
+            if not (gs.is_all_last and gs.my_placement == 1):
+                return False
+
+        # Concentrated wait: if one tile has 3+ copies but others have 0-1,
+        # the wait looks wide but is actually fragile (opponent might hold it)
+        if num_wait_kinds >= 2 and max_single_tile >= 3:
+            # Good concentration — most copies on one tile, damaten is viable
+            # since we have a realistic tsumo target
+            pass
+        elif num_wait_kinds >= 2 and total_remaining >= 6:
+            # Wide wait with decent mountain — damaten is strong
+            pass
 
     # === Bad wait shape: riichi adds value via ura dora and intimidation ===
     if bad_wait and hand_value < 8000:
@@ -328,6 +368,9 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
             kyotaku_bonus = gs.kyotaku * 1000
             if kyotaku_bonus >= 2000:
                 return False
+            # With good wait (tile-level): damaten to protect lead
+            if total_remaining >= 6 and num_wait_kinds >= 2:
+                return True
             return hand_value >= 3000
 
         if lead >= 12000:
@@ -336,6 +379,9 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
         kyotaku_bonus = gs.kyotaku * 1000
         if kyotaku_bonus >= 2000:
             return False
+        # Good mountain = damaten viable even with moderate hand value
+        if total_remaining >= 8 and hand_value >= 2000:
+            return True
         return hand_value >= 3000
 
     # === South round 1st place with prefer_damaten ===
@@ -345,9 +391,11 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
             return True
         if hand_value >= 8000 and lead <= 8000:
             return True
+        # Good wide wait — damaten to maintain lead
+        if total_remaining >= 8 and num_wait_kinds >= 2 and lead >= 4000:
+            return True
 
     # === Any placement: haneman+ closed hand with GOOD wait ===
-    # Bad-wait haneman+ still prefers riichi for intimidation.
     if hand_value >= 12000 and not gs.my_info.is_open() and not bad_wait:
         return True
 

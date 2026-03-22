@@ -169,12 +169,15 @@ def estimate_risk_of_deal_in(gs: GameState) -> float:
             if estimated_pts > 0:
                 base_risk = max(base_risk, float(estimated_pts))
 
-    # Dama tenpai signal from tedashi patterns
+    # Dama tenpai signal from tedashi patterns.
+    # A closed hand showing tsumogiri streak → tedashi pattern suggests
+    # tenpai with a potentially high-value damaten hand. Top players treat
+    # this as a serious threat (could be mangan+ closed hand).
     for i, p in enumerate(gs.players):
         if i == gs.player_id or p.riichi_declared:
             continue
         if p.tedashi_after_tsumogiri_streak():
-            base_risk = max(base_risk, 5200)
+            base_risk = max(base_risk, 7700)  # assume at least mangan potential
 
     # Honba bonus
     base_risk += gs.honba * 300
@@ -240,7 +243,21 @@ def evaluate_push_fold(gs: GameState, shanten: int,
                 "iishanten, early-mid game"
             )
         else:
-            # Late game iishanten
+            # Late game iishanten: top players are much more cautious here.
+            # Multiple riichi or extreme threat with cheap hand → fold.
+            # Two+ riichi opponents means both threat AND risk are elevated;
+            # top players fold iishanten here unless the hand is very strong.
+            n_riichi = gs.num_riichi_opponents
+            if n_riichi >= 2 and hand_value < risk * 0.5:
+                return PushFoldResult(
+                    Decision.FOLD, 0.7,
+                    "iishanten, late, double riichi, weak hand"
+                )
+            if threat >= 2.5 and hand_value < risk * 0.4:
+                return PushFoldResult(
+                    Decision.FOLD, 0.7,
+                    "iishanten, late, extreme threat, weak hand"
+                )
             if hand_value >= risk * 0.5 and good_shape:
                 return PushFoldResult(
                     Decision.PUSH, 0.65,
