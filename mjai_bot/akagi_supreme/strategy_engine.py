@@ -654,8 +654,8 @@ class StrategyEngine:
             self.last_thought.append(f"【安全度分析】安全牌なし → 中程度の危険度から「{chosen_name}」を選択")
             return chosen_idx
 
-        # Only dangerous tiles available: just pick the least dangerous
-        candidates.sort(key=lambda x: x[1])
+        # Only dangerous tiles available: pick least dangerous with isolation tiebreak
+        candidates.sort(key=lambda x: (x[1], -self._tile_isolation_score(ACTION_TILE_NAMES[x[0]] if x[0] < len(ACTION_TILE_NAMES) else "")))
         chosen = candidates[0]
         chosen_name = ACTION_TILE_NAMES[chosen[0]] if chosen[0] < len(ACTION_TILE_NAMES) else str(chosen[0])
         self.last_thought.append(f"【安全度分析】安全な牌がなく危険牌のみ → 最低危険度の「{chosen_name}」(危険度:{chosen[1]:.2f})を選択")
@@ -1002,7 +1002,7 @@ class StrategyEngine:
             if not wait_parts:
                 return ""
             
-            shape_text = "多面張" if len(wait_details) >= 3 else "両面" if len(wait_details) == 2 else "単騎/辺張/嵌張"
+            shape_text = "多面張" if len(wait_details) >= 3 else f"{len(wait_details)}面待ち" if len(wait_details) == 2 else "単騎/辺張/嵌張"
             return f"{', '.join(wait_parts)}（計{total}枚, {shape_text}）"
         except Exception:
             return ""

@@ -384,15 +384,9 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
                 if not (gs.is_all_last and gs.my_placement in (2, 3)):
                     return True
 
-        # Concentrated wait: if one tile has 3+ copies but others have 0-1,
-        # the wait looks wide but is actually fragile (opponent might hold it)
-        if num_wait_kinds >= 2 and max_single_tile >= 3:
-            # Good concentration — most copies on one tile, damaten is viable
-            # since we have a realistic tsumo target
-            pass
-        elif num_wait_kinds >= 2 and total_remaining >= 6:
-            # Wide wait with decent mountain — damaten is strong
-            pass
+            # Good concentration on one tile or wide wait — damaten strength
+            # is already handled by the general control flow below.
+            # (No special action needed here; continue to placement checks.)
 
     # === Bad wait shape: riichi adds value via ura dora and intimidation ===
     # Exception: all-last 1st where riichi deposit (1000pts) threatens our lead.
