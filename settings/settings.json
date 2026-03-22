@@ -6,7 +6,7 @@
             "height": 960
         }
     },
-    "model": "mortal",
+    "model": "akagi_supreme",
     "theme": "textual-dark",
     "ot_server": {
         "server": "http://127.0.0.1:8080",

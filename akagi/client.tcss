@@ -487,3 +487,17 @@ SettingsScreen {
     margin: 0 1;
 }
 
+#rec_main {
+    width: 1fr;
+    height: 1fr;
+    align: center middle;
+}
+
+.mortal_label {
+    width: 1fr;
+    height: auto;
+    text-align: center;
+    color: $text-muted;
+    text-style: italic;
+    padding-bottom: 1;
+}

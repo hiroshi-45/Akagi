@@ -82,14 +82,23 @@ class SupremeEngine:
                 )
                 adjusted_actions.append(adjusted)
 
+                from .strategy_engine import ACTION_TILE_NAMES
+                def get_action_name(idx):
+                    return ACTION_TILE_NAMES[idx] if idx < len(ACTION_TILE_NAMES) else str(idx)
+                    
+                self.strategy.last_mortal_action_name = get_action_name(original_action)
+                self.strategy.last_supreme_action_name = get_action_name(adjusted)
+
                 if adjusted != original_action:
                     logger.debug(
                         f"Strategy override: {original_action} -> {adjusted} "
                         f"(placement={self.strategy.gs.my_placement}, "
                         f"threat={self.strategy.gs.max_opponent_threat():.1f})"
                     )
+                logger.debug(f"[supreme_engine] original: {original_action}, adjusted: {adjusted}, thought: {self.strategy.last_thought}")
             except Exception as e:
-                logger.warning(f"Strategy engine error, using Mortal's action: {e}")
+                import traceback
+                logger.error(f"Strategy engine error, using Mortal's action: {e}\n{traceback.format_exc()}")
                 adjusted_actions.append(original_action)
 
         return adjusted_actions, q_out, masks_out, is_greedy

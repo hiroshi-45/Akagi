@@ -143,8 +143,16 @@ class AutoPlayMajsoul(object):
         logger.debug(f"reach_accepted: {self.bot.self_riichi_accepted}")
 
         if mjai_msg['type'] == 'dahai' and not self.bot.self_riichi_accepted:
-            # Wait scheme: light random + dealer first-discard extra
-            random_time = random.uniform(0.6, 4.0)
+            # Wait scheme: broader random + occasional "long thinking"
+            # Standard: 0.5s to 5.0s
+            random_time = random.uniform(0.5, 5.0)
+            
+            # 5% chance of thinking longer (2s to 10s extra)
+            if random.random() < 0.05:
+                extra_thinking = random.uniform(2.0, 10.0)
+                random_time += extra_thinking
+                logger.debug(f"[THINKING] Extra wait applied: +{extra_thinking:.2f}s")
+
             if not self.bot.last_kawa_tile:
                 random_time = max(random_time, 4.0)
                 try:
@@ -205,10 +213,10 @@ class AutoPlayMajsoul(object):
 
         # 鳴きのときだけ pre-wait / none は短め
         if mjai_msg['type'] in {'chi','pon','ankan','kakan'}:
-            pre = max(0.0, NAKI_PREWAIT + random.uniform(-0.02, 0.02))
+            pre = max(0.0, NAKI_PREWAIT + random.uniform(-0.1, 0.2))
             return_points.append(Point(-1, -1, pre))
         elif mjai_msg['type'] == 'none':
-            pre = max(0.0, NAKI_NONE_PREWAIT)
+            pre = max(0.0, NAKI_NONE_PREWAIT + random.uniform(0.0, 0.1))
             return_points.append(Point(-1, -1, pre))
 
         for idx, operation in enumerate(operation_list):
@@ -221,9 +229,9 @@ class AutoPlayMajsoul(object):
                 elif mjai_msg['type'] == 'zimo':
                     btn_wait = AKAGI_TSUMO_WAIT
                 elif mjai_msg['type'] == 'ryukyoku':
-                    btn_wait = AKAGI_REACH_WAIT + AKAGI_REACH_WAIT
+                    btn_wait = AKAGI_REACH_WAIT + AKAGI_REACH_WAIT + random.uniform(-0.1, 0.3)
                 else:
-                    btn_wait = max(0.0, NAKI_BUTTON_WAIT + random.uniform(-0.02, 0.02))
+                    btn_wait = max(0.0, NAKI_BUTTON_WAIT + random.uniform(-0.1, 0.3))
 
                 return_points.append(
                     Point(
@@ -351,7 +359,7 @@ class AutoPlayMajsoul(object):
         if is_tsumohai:
             if dahai == tsumohai:
                 pai_coord = self.get_pai_coord(13, tehai)
-                return_points.append(Point(pai_coord[0], pai_coord[1], 0.3))
+                return_points.append(Point(pai_coord[0], pai_coord[1], 0.2 + random.uniform(0, 0.4)))
                 return return_points
         for i in range(13):
             if i >= len(tehai):
@@ -359,7 +367,7 @@ class AutoPlayMajsoul(object):
                 break
             if dahai == tehai[i]:
                 pai_coord = self.get_pai_coord(i, tehai)
-                return_points.append(Point(pai_coord[0], pai_coord[1], 0.3))
+                return_points.append(Point(pai_coord[0], pai_coord[1], 0.2 + random.uniform(0, 0.4)))
                 return return_points
 
 # Custom compare function for lists of pai

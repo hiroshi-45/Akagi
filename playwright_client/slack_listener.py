@@ -208,7 +208,8 @@ def handle_message(event, logger):
 
 def start_socket_mode_in_thread():
     if not (BOT_TOKEN and APP_TOKEN and TARGET_CHANNEL):
-        raise SystemExit("SLACK_BOT_TOKEN / SLACK_APP_TOKEN / TARGET_CHANNEL を設定してください。")
+        print("[slack_listener] SLACK_BOT_TOKEN / SLACK_APP_TOKEN / TARGET_CHANNEL が未設定のため、Slack連携は無効化されます。", flush=True)
+        return None
     th = threading.Thread(
         target=lambda: SocketModeHandler(app, APP_TOKEN).start(),
         name="SlackSocketMode",

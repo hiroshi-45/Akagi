@@ -466,7 +466,7 @@ class Consume(Horizontal):
             consume_label: Label = self.query_one(f"#consume_{i}")
             consume_label.update(TILE_2_UNICODE_ART_RICH["?"])
 
-class Recommandation(Horizontal):
+class Recommandation(Vertical):
     """
     Recommandation widget.
     """
@@ -474,13 +474,15 @@ class Recommandation(Horizontal):
         super().__init__(**kwargs)
 
     def compose(self) -> ComposeResult:
-        yield Button("Akagi", variant="default", id="recommandation_button")
-        yield Label(TILE_2_UNICODE_ART_RICH["?"], id="recommandation_tile")
-        yield Label(EMPTY_VERTICAL_RULE, id="recommandation_rule")
-        yield Consume(id="recommandation_consume")
-        yield Digits(value="00.00", id="recommandation_score")
+        with Horizontal(id="rec_main"):
+            yield Button("Akagi", variant="default", id="recommandation_button")
+            yield Label(TILE_2_UNICODE_ART_RICH["?"], id="recommandation_tile")
+            yield Label(EMPTY_VERTICAL_RULE, id="recommandation_rule")
+            yield Consume(id="recommandation_consume")
+            yield Digits(value="00.00", id="recommandation_score")
+        yield Label("", id="recommandation_mortal", classes="mortal_label")
 
-    def update_recommandation(self, recommand: tuple[str, float]) -> None:
+    def update_recommandation(self, recommand: tuple[str, float], mortal: str = "") -> None:
         global mjai_bot
         action_name: dict[str, str] = {
             "reach": "Reach",
@@ -584,6 +586,12 @@ class Recommandation(Horizontal):
             recommandation_consume.clear_consume()
         recommandation_score.update(f"{recommand[1]*100:.2f}")
 
+        recommandation_mortal: Label = self.query_one("#recommandation_mortal")
+        if mortal:
+            recommandation_mortal.update(f"Mortal: {mortal}")
+        else:
+            recommandation_mortal.update("")
+
     def clear_recommandation(self) -> None:
         recommandation_button: Button = self.query_one("#recommandation_button")
         recommandation_button.label = "Akagi"
@@ -596,6 +604,9 @@ class Recommandation(Horizontal):
         recommandation_consume.clear_consume()
         recommandation_score: Digits = self.query_one("#recommandation_score")
         recommandation_score.update("00.00")
+        
+        recommandation_mortal: Label = self.query_one("#recommandation_mortal")
+        recommandation_mortal.update("")
 
     @on(Button.Pressed, "#recommandation_button")
     def recommandation_button_clicked(self) -> None:
@@ -638,11 +649,16 @@ class Recommandations(Vertical):
         if "q_values" not in mjai_msg["meta"]:
             return
         meta = mjai_msg["meta"]
+        mortal_action = meta.get("mortal_action", "")
+        supreme_action = meta.get("supreme_action", "")
         recommands: list[tuple[str, float]] = meta_to_recommend(meta, mjai_bot.is_3p)
         for i in range(self.RECOMMANDATION_COUNT):
             recommand: Recommandation = self.query_one(f"#recommandation_{i}")
             if i < len(recommands):
-                recommand.update_recommandation(recommands[i])
+                if i == 0 and supreme_action and mortal_action and supreme_action != mortal_action:
+                    recommand.update_recommandation(recommands[i], mortal=mortal_action)
+                else:
+                    recommand.update_recommandation(recommands[i], mortal="")
             else:
                 recommand.clear_recommandation()
 
@@ -860,7 +876,41 @@ class AkagiApp(App):
         ("t", "random_theme", "Random Theme"),
         ("h", "help_screen", "Help"),
         ("z", "help_screen_zh", "Help (中文)"),
+        ("comma", "decrease_left_width", "Shrink Top Recommendations"),
+        ("period", "increase_left_width", "Expand Top Recommendations"),
     ]
+
+    def action_decrease_left_width(self) -> None:
+        rec = self.query_one("#recommandation")
+        csw = self.query_one("#content_switcher")
+        
+        unit_rec = rec.styles.width.unit if (rec.styles.width and hasattr(rec.styles.width, 'unit')) else "fr"
+        if unit_rec == "fr" or unit_rec is None:
+            val_rec = 60
+            val_csw = 40
+        else:
+            val_rec = rec.styles.width.value if rec.styles.width else 60
+            val_csw = csw.styles.width.value if csw.styles.width else 40
+            
+        if val_rec > 10:
+            rec.styles.width = f"{int(val_rec - 5)}%"
+            csw.styles.width = f"{int(val_csw + 5)}%"
+
+    def action_increase_left_width(self) -> None:
+        rec = self.query_one("#recommandation")
+        csw = self.query_one("#content_switcher")
+        
+        unit_rec = rec.styles.width.unit if (rec.styles.width and hasattr(rec.styles.width, 'unit')) else "fr"
+        if unit_rec == "fr" or unit_rec is None:
+            val_rec = 60
+            val_csw = 40
+        else:
+            val_rec = rec.styles.width.value if rec.styles.width else 60
+            val_csw = csw.styles.width.value if csw.styles.width else 40
+            
+        if val_csw > 10:
+            rec.styles.width = f"{int(val_rec + 5)}%"
+            csw.styles.width = f"{int(val_csw - 5)}%"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -923,7 +973,7 @@ class AkagiApp(App):
             ContentSwitcherCustom(
                 BotStatus(id="bot_status"),
                 MJAIOutLog(
-                    max_lines=1000, min_width=80, wrap=False,
+                    max_lines=1000, min_width=80, wrap=True,
                     highlight=True, markup=True, auto_scroll=True,
                     id="mjai_out_log"
                 ),
@@ -977,7 +1027,40 @@ class AkagiApp(App):
                     ((mjai_response["type"] != "none" or mjai_bot.can_act   ) and (not mjai_bot.is_3p)) or
                     ((mjai_response["type"] != "none" or mjai_bot.can_act_3p) and (    mjai_bot.is_3p))
                 ):
-                    mjai_out_log.write(mjai_response)
+                    import json
+                    meta = mjai_response.get("meta", {})
+                    out_text = f"[bold cyan]━━━ Action: {mjai_response.get('type')} ━━━[/bold cyan]\n"
+
+                    if "shanten" in meta:
+                        out_text += f"[bold magenta]シャンテン数: {meta['shanten']}[/bold magenta]\n"
+
+                    out_text += f"\n[bold underline]AIの思考プロセス:[/bold underline]\n"
+                    if "thought" in meta and meta["thought"]:
+                        for t in meta["thought"]:
+                            # カテゴリ別の色分け
+                            if t.startswith("【状況】"):
+                                out_text += f"  [cyan]{t}[/cyan]\n"
+                            elif t.startswith("【手牌】"):
+                                out_text += f"  [bold magenta]{t}[/bold magenta]\n"
+                            elif t.startswith("【待ち】"):
+                                out_text += f"  [bold yellow]{t}[/bold yellow]\n"
+                            elif t.startswith("【脅威分析】"):
+                                out_text += f"  [bold red]{t}[/bold red]\n"
+                            elif t.startswith("【判断】") or t.startswith("【順位調整】"):
+                                out_text += f"  [bold blue]{t}[/bold blue]\n"
+                            elif t.startswith("【安全度分析】"):
+                                out_text += f"  [bold green]{t}[/bold green]\n"
+                            elif t.startswith("【決断】"):
+                                out_text += f"  [bold white]{t}[/bold white]\n"
+                            elif t.startswith("  └"):
+                                out_text += f"  [dim]{t}[/dim]\n"
+                            else:
+                                out_text += f"  {t}\n"
+                    else:
+                        out_text += "  (詳細な思考プロセスは記録されていません)\n"
+                    out_text += "[dim]─────────────────────[/dim]\n"
+
+                    mjai_out_log.write(out_text)
                 # ============================================= #
                 #             Update Widgets and UI             #
                 # ============================================= #

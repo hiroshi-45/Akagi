@@ -65,4 +65,4 @@ def load_model(seat: int) -> LibriichBot:
     supreme = SupremeEngine(base_engine)
 
     bot = LibriichBot(supreme, seat)
-    return bot
+    return bot, supreme

@@ -103,6 +103,15 @@ def meta_to_recommend(meta: dict, is_3p=False) -> dict:
             q_value_idx += 1
 
     recommend = sorted(recommend, key=lambda x: x[1], reverse=True)
+
+    supreme_action = meta.get("supreme_action", "")
+    if supreme_action:
+        for i, (act_name, q_val) in enumerate(recommend):
+            if act_name == supreme_action:
+                item = recommend.pop(i)
+                recommend.insert(0, item)
+                break
+
     return recommend
 
 def state_to_tehai(state) -> tuple[list[str], str]:

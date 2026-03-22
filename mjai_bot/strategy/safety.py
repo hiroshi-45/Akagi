@@ -168,45 +168,71 @@ def expand_dora_numbers(dora_inds: Optional[List[Tile]]) -> Dict[str, Set[int]]:
 # スジ/裏筋/壁/赤ドラ/跨ぎドラ
 # ------------------------------
 def suji_partner_ranks(r: int) -> Set[int]:
-    # 捨て牌ランク r に対して「スジ安全」になるランクの集合を返す。
-    # 両面待ちのペア: (1,4), (2,5), (3,6), (4,7), (5,8), (6,9)
-    # 4切り → 1 と 7 が安全、6切り → 3 と 9 が安全
-    mp = {1: (4,), 2: (5,), 3: (6,), 4: (1, 7), 5: (2, 8), 6: (3, 9), 7: (4,), 8: (5,), 9: (6,)}
-    v = mp.get(r)
-    if v is None:
-        return set()
-    return set(v)
+    # This function is conceptually flawed if used directly for 'if r in seen_partner'.
+    # Keeping for backwards safety but suji_safe will be rewritten entirely.
+    return set()
 
-def suji_safe(tile: Tile, opp_hand_cuts: List[Tile], seq_conf: float = 1.0) -> bool:
+def suji_safe(tile: Tile, opp_all_tiles: List[Tile], seq_conf: float = 1.0) -> bool:
     """
     スジ判定。seq_conf は直前系列からの“信頼度”係数（>1で強め、<1で弱め）。
-    ここでは bool を返すが、後段で信頼係数を用いて減点幅を可変化する。
     """
     s, r, _ = parse_tile(tile)
     if r is None:
         return False
-    seen_partner = set()
-    for d in opp_hand_cuts:
+        
+    cut_ranks = set()
+    for d in opp_all_tiles:
         sd, rd, _ = parse_tile(d)
-        if rd is None:
-            continue
-        if sd == s:
-            seen_partner |= suji_partner_ranks(rd)
-    return r in seen_partner
+        if sd == s and rd is not None:
+            cut_ranks.add(rd)
+            
+    # 正しいスジの定義
+    # 1安全 <- 4切り
+    # 2安全 <- 5切り
+    # 3安全 <- 6切り
+    # 4安全 <- 1と7両方切り (中スジ)
+    # 5安全 <- 2と8両方切り
+    # 6安全 <- 3と9両方切り
+    # 7安全 <- 4切り
+    # 8安全 <- 5切り
+    # 9安全 <- 6切り
+    if r == 1: return 4 in cut_ranks
+    if r == 2: return 5 in cut_ranks
+    if r == 3: return 6 in cut_ranks
+    if r == 4: return (1 in cut_ranks and 7 in cut_ranks)
+    if r == 5: return (2 in cut_ranks and 8 in cut_ranks)
+    if r == 6: return (3 in cut_ranks and 9 in cut_ranks)
+    if r == 7: return 4 in cut_ranks
+    if r == 8: return 5 in cut_ranks
+    if r == 9: return 6 in cut_ranks
+    return False
 
 def urasuji_danger(tile: Tile, opp_hand_cuts: List[Tile]) -> bool:
+    """
+    裏スジ（捨て牌の隣の牌が絡むスジ）の危険度。
+    例：1切りからの2-5待ちなど。
+    """
     s, r, _ = parse_tile(tile)
     if r is None:
         return False
-    uramap = {6: 3, 7: 4, 8: 5, 3: 6, 4: 7, 5: 8, 2: 5, 1: 4, 9: 6}
+        
+    uramap = {
+        1: [2, 5],
+        2: [1, 4, 3, 6],
+        3: [2, 5, 4, 7],
+        4: [3, 6, 5, 8],
+        5: [1, 4, 6, 9],
+        6: [2, 5, 4, 7],
+        7: [3, 6, 5, 8],
+        8: [4, 7, 6, 9],
+        9: [5, 8]
+    }
+    
     targets = set()
     for d in opp_hand_cuts:
         sd, rd, _ = parse_tile(d)
-        if rd is None:
-            continue
-        if sd == s:
-            u = uramap.get(rd)
-            if u:
+        if sd == s and rd is not None:
+            for u in uramap.get(rd, []):
                 targets.add(u)
     return r in targets
 
@@ -226,41 +252,84 @@ def count_visible_numbers(rivers: Dict[int, List[Union[Tile, RiverItem]]],
 
 def kabe_bonus(tile: Tile, visible: Dict[str, Dict[int, int]], endgame_boost: float = 1.0) -> float:
     """
-    壁読みの安全加点。終盤（endgame_boost>1）では加点を強める。
+    壁読み（ノーチャンス・ワンチャンス）の安全加点。
+    終盤（endgame_boost>1）では加点を強める。
     """
     s, r, _ = parse_tile(tile)
     if r is None or s not in SUITS:
         return 0.0
     v = visible.get(s, {})
     bonus = 0.0
-    if v.get(1, 0) >= 4 and r == 2:
-        bonus += 0.25
-    if v.get(9, 0) >= 4 and r == 8:
-        bonus += 0.25
-    for n in range(2, 9):
-        if v.get(n, 0) >= 4 and abs(r - n) == 1:
-            bonus += 0.15
+    
+    is_no_chance = False
+    is_one_chance = False
+    
+    # 壁の法則に基づく両面待ちの否定
+    if r == 1:
+        if v.get(2, 0) >= 4: is_no_chance = True
+        elif v.get(2, 0) == 3: is_one_chance = True
+        if v.get(3, 0) >= 4: is_no_chance = True
+        elif v.get(3, 0) == 3: is_one_chance = True
+    elif r == 2:
+        if v.get(3, 0) >= 4: is_no_chance = True
+        elif v.get(3, 0) == 3: is_one_chance = True
+        if v.get(4, 0) >= 4: is_no_chance = True
+        elif v.get(4, 0) == 3: is_one_chance = True
+    elif r == 3:
+        if v.get(4, 0) >= 4: is_no_chance = True
+        elif v.get(4, 0) == 3: is_one_chance = True
+        if v.get(5, 0) >= 4: is_no_chance = True
+        elif v.get(5, 0) == 3: is_one_chance = True
+    elif r == 4:
+        # 4 can be waited on via 23 (ryanmen), 45 (ryanmen for 3 or 6), or 56 (ryanmen)
+        # If 3 is walled, 12-waiting-on-3 pattern is blocked (one side blocked)
+        # If 6 is walled, 67-waiting-on-6 pattern is blocked (one side blocked)
+        if v.get(3, 0) >= 4:
+            is_one_chance = True
+        if v.get(6, 0) >= 4:
+            is_one_chance = True
+    elif r == 5:
+        # 5 can be waited on via 34, 56, 46 (kanchan)
+        # If 4 is walled, 34-ryanmen is blocked
+        # If 6 is walled, 67→56-ryanmen is blocked
+        if v.get(4, 0) >= 4:
+            is_one_chance = True
+        if v.get(6, 0) >= 4:
+            is_one_chance = True
+    elif r == 6:
+        # Symmetric to 4
+        if v.get(4, 0) >= 4:
+            is_one_chance = True
+        if v.get(7, 0) >= 4:
+            is_one_chance = True
+    elif r == 7:
+        if v.get(5, 0) >= 4: is_no_chance = True
+        elif v.get(5, 0) == 3: is_one_chance = True
+        if v.get(6, 0) >= 4: is_no_chance = True
+        elif v.get(6, 0) == 3: is_one_chance = True
+    elif r == 8:
+        if v.get(6, 0) >= 4: is_no_chance = True
+        elif v.get(6, 0) == 3: is_one_chance = True
+        if v.get(7, 0) >= 4: is_no_chance = True
+        elif v.get(7, 0) == 3: is_one_chance = True
+    elif r == 9:
+        if v.get(7, 0) >= 4: is_no_chance = True
+        elif v.get(7, 0) == 3: is_one_chance = True
+        if v.get(8, 0) >= 4: is_no_chance = True
+        elif v.get(8, 0) == 3: is_one_chance = True
+
+    if is_no_chance:
+        bonus += 0.35
+    elif is_one_chance:
+        bonus += 0.15
+        
     return bonus * endgame_boost
 
 def no_chance_bonus(tile: Tile, visible: Dict[str, Dict[int, int]], remaining_tiles: int) -> float:
     """
-    ノーチャンス/両無筋寄りの追加安全。簡易:
-      - 同スートで『端の壁＋周辺3枚以上見え』等は +α
-      - 終盤(<=14)で +強化
+    kabe_bonusに統合済み。後方互換で0.0を返す。
     """
-    s, r, _ = parse_tile(tile)
-    if r is None or s not in SUITS:
-        return 0.0
-    v = visible.get(s, {})
-    add = 0.0
-    # 端ノーチャンス強化
-    if r == 2 and v.get(1, 0) >= 4 and (v.get(3, 0) + v.get(4, 0)) >= 3:
-        add += 0.08
-    if r == 8 and v.get(9, 0) >= 4 and (v.get(6, 0) + v.get(7, 0)) >= 3:
-        add += 0.08
-    if remaining_tiles <= 14:
-        add *= 1.5
-    return add
+    return 0.0
 
 def red_dora_pressure(tile: Tile) -> float:
     """赤5そのもの・同スート5周辺のわずかな危険増。"""
@@ -310,6 +379,24 @@ def sequence_confidence(opp_hand_cuts_list: List[Tile]) -> float:
         return 1.15
     return 1.0
 
+def matagi_danger(tile: Tile, opp_hand_cuts: List[Tile]) -> float:
+    """
+    またぎスジの危険度。直近の手出し牌（ターツ落としやテンパイ宣言牌周辺）は危険。
+    """
+    s, r, _ = parse_tile(tile)
+    if r is None or s not in SUITS:
+        return 0.0
+    
+    recent_cuts = opp_hand_cuts[-3:]
+    danger = 0.0
+    for d in recent_cuts:
+        sd, rd, _ = parse_tile(d)
+        if rd is None or sd != s:
+            continue
+        if abs(r - rd) == 1 or abs(r - rd) == 2:
+            danger += 0.10
+    return danger
+
 # ------------------------------
 # コンテキスト & 総合危険度
 # ------------------------------
@@ -341,19 +428,38 @@ def danger_against_player(tile: Tile,
     if tile in only_tiles(opp_river):
         return 0.0
 
-    base = 1.0
     s, r, _ = parse_tile(tile)
+    
     if is_honor(tile):
         # 字牌は現物でなければ中程度のまま（副露読みなどは別途）
-        pass
+        base = 1.0
     else:
-        # スジ/裏筋（手出しのみ参照）
+        # Top player logic: Base danger depends heavily on tile rank (端牌 vs 中張牌)
+        if r in (1, 9):
+            base = 0.5   # 端牌 without suji is moderately safe
+        elif r in (2, 8):
+            base = 0.7
+        elif r in (3, 7):
+            base = 0.9
+        else:
+            base = 1.15  # 無筋 4,5,6 is extremely dangerous
+
+        # スジ/裏筋
         opp_hand = hand_cuts(opp_river)
+        opp_all = only_tiles(opp_river)
         seq_conf = sequence_confidence(opp_hand)
-        if suji_safe(tile, opp_hand, seq_conf):
+        
+        # スジはツモ切りも含めた全捨て牌を参照する
+        if suji_safe(tile, opp_all, seq_conf):
+            # Suji makes the tile safer.
+            # Example: 1/9 -> 0.5 - 0.35 = 0.15 (very safe)
+            # 4/5/6 -> 1.15 - 0.35 = 0.8 (still somewhat dangerous as Nakasuji)
             base -= 0.35 * min(seq_conf, 1.3)  # 信頼度を軽く効かせる
+        # 裏筋・跨ぎ筋は手出しのみを参照する
         elif urasuji_danger(tile, opp_hand):
             base += 0.15
+
+        base += matagi_danger(tile, opp_hand)
 
         # 壁/ノーチャンス（終盤強化）
         end_boost = 1.3 if ctx.remaining_tiles <= 14 else 1.0

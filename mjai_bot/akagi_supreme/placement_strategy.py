@@ -114,10 +114,11 @@ def _all_last_strategy(gs: GameState, placement: int,
             han_direct = gs.min_han_for_points(direct_pts, is_tsumo=False)
             if han_direct < han_for_1st_ron and han_direct <= 2:
                 return PlacementAdjustment(
-                    riichi_multiplier=1.1,
+                    riichi_multiplier=0.8,
                     meld_multiplier=1.0,
+                    prefer_damaten=True,
                     min_push_value=max(1000, direct_pts),
-                    reason=f"all-last 2nd, direct hit on 1st ({han_direct}han)"
+                    reason=f"all-last 2nd, direct hit on 1st ({han_direct}han), prefer damaten"
                 )
 
         if han_for_1st_ron <= 3:
@@ -133,9 +134,9 @@ def _all_last_strategy(gs: GameState, placement: int,
             # to dodge dangerous tiles and protect 2nd place.
             return PlacementAdjustment(
                 riichi_multiplier=0.9,
-                meld_multiplier=1.0,
+                meld_multiplier=1.1,
                 prefer_damaten=True,
-                reason="all-last 2nd, 3rd is close - damaten to protect"
+                reason="all-last 2nd, 3rd is close - damaten to protect, meld for speed"
             )
         if diff_below < 8000:
             return PlacementAdjustment(
@@ -180,10 +181,17 @@ def _all_last_strategy(gs: GameState, placement: int,
                 meld_multiplier=1.1,
                 reason="all-last 3rd, close to 2nd"
             )
+        if diff_below >= 8000 and han_for_2nd >= 4:
+            return PlacementAdjustment(
+                riichi_multiplier=0.8,
+                meld_multiplier=1.3,
+                prefer_damaten=True,
+                reason="all-last 3rd, 4th far, 2nd far - fast agari to secure 3rd"
+            )
         return PlacementAdjustment(
             riichi_multiplier=0.9,
-            meld_multiplier=1.0,
-            reason="all-last 3rd, steady play"
+            meld_multiplier=1.1,
+            reason="all-last 3rd, steady play to secure placement"
         )
 
     # placement == 4
@@ -198,10 +206,13 @@ def _all_last_strategy(gs: GameState, placement: int,
             reason="all-last 4th dealer, any agari for renchan"
         )
 
+    required_val = max(2000, int(pts_for_3rd * 0.8))
+
     if han_for_3rd_ron <= 1:
         return PlacementAdjustment(
             riichi_multiplier=1.0,
             meld_multiplier=1.3,
+            min_push_value=required_val,
             reason=f"all-last 4th, very close ({pts_for_3rd}pts needed)"
         )
     if han_for_3rd_tsumo <= 3:
@@ -215,13 +226,13 @@ def _all_last_strategy(gs: GameState, placement: int,
         return PlacementAdjustment(
             riichi_multiplier=1.3,
             meld_multiplier=0.8,
-            min_push_value=5200,
+            min_push_value=required_val,
             reason="all-last 4th, need mangan"
         )
     return PlacementAdjustment(
         riichi_multiplier=1.1,
         meld_multiplier=0.7,
-        min_push_value=7700,
+        min_push_value=required_val,
         reason="all-last 4th, desperate"
     )
 
@@ -320,17 +331,6 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
 
     my_turn = gs.my_turn
 
-    # === Opponent riichi: riichi for intimidation and ura dora ===
-    # When opponents have declared riichi, our riichi adds:
-    # 1. Intimidation: non-riichi opponents fold harder → fewer deal-ins to us
-    # 2. Ura dora: free value since hand is already locked
-    # 3. Ippatsu chance: opponents in riichi can't dodge
-    # Top players prefer riichi over damaten when opponents are in riichi,
-    # UNLESS we're all-last 1st protecting a lead (ending game > extra points).
-    if gs.num_riichi_opponents >= 1:
-        if not (gs.is_all_last and gs.my_placement == 1):
-            return False  # riichi, don't damaten
-
     # === Get tile-level wait information ===
     wait_details = gs.wait_tile_details()
     num_wait_kinds = len(wait_details)  # how many different tiles we're waiting on
@@ -343,22 +343,46 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
 
     bad_wait = total_remaining > 0 and total_remaining <= 4
 
+    # === Opponent riichi: riichi for intimidation and ura dora ===
+    # When opponents have declared riichi, our riichi adds:
+    # 1. Intimidation: non-riichi opponents fold harder → fewer deal-ins to us
+    # 2. Ura dora: free value since hand is already locked
+    # 3. Ippatsu chance: opponents in riichi can't dodge
+    # Top players prefer riichi over damaten when opponents are in riichi,
+    # UNLESS we're all-last 1st protecting a lead (ending game > extra points),
+    # or our hand is too cheap to justify the risk of oi-riichi.
+    if gs.num_riichi_opponents >= 1:
+        if not (gs.is_all_last and gs.my_placement == 1):
+            # トッププレイヤーは対リーチ時、PUSHと判断された以上は攻めるべき。
+            # 悪形安手でもリーチで威嚇して周りを降ろすのが正しい判断。
+            # ダマテンで構えても悪形では出ない/ツモれないので、リーチの+1翻と
+            # 威嚇効果（他家ベタオリ誘発）の方が期待値が高い。
+            return False  # 追っかけリーチ (oi-riichi) — always riichi vs riichi
+
     # === Very late game: damaten loses value ===
+    # BUGFIX: In very late game (turn 14+), riichi is bad because of the 1000pt risk
+    # and few draws left. Top players prefer damaten to maintain flexibility and save points.
     if my_turn >= 14 and not (gs.is_all_last and gs.my_placement == 1):
-        return False
+        return True
 
     # === Tile-level mountain analysis (山残り) ===
     if total_remaining > 0:
-        # Single wait kind with only 1 copy left: riichi for intimidation
-        # (can't realistically tsumo, so threaten opponents into folding)
+        # Single wait kind with only 1 copy left: extremely low tsumo expectations.
+        # Top players usually avoid committing 1000 points to a dead wait.
+        # Prefer damaten to keep fold options open and avoid point loss.
         if num_wait_kinds == 1 and max_single_tile <= 1:
             if not (gs.is_all_last and gs.my_placement == 1):
-                return False
+                return True
 
-        # Multiple wait kinds but total <= 2: very thin overall
-        if total_remaining <= 2 and num_wait_kinds <= 2:
+        # Multiple wait kinds but total <= 2: very thin overall.
+        # Top players do not riichi a nearly dead wait to avoid getting locked into a bad situation.
+        # EXCEPTION: All-last 2nd/3rd — with ultra-thin wait, riichi intimidation is
+        # more valuable than damaten because tsumo chance is near zero anyway.
+        # Let the bad_wait section below handle placement-specific logic.
+        if total_remaining <= 2:
             if not (gs.is_all_last and gs.my_placement == 1):
-                return False
+                if not (gs.is_all_last and gs.my_placement in (2, 3)):
+                    return True
 
         # Concentrated wait: if one tile has 3+ copies but others have 0-1,
         # the wait looks wide but is actually fragile (opponent might hold it)
@@ -372,12 +396,29 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
 
     # === Bad wait shape: riichi adds value via ura dora and intimidation ===
     # Exception: all-last 1st where riichi deposit (1000pts) threatens our lead.
-    # Top players damaten with bad wait when the lead is within noten penalty
-    # range (~3000pts) — losing 1000 to riichi narrows the margin dangerously.
+    # Exception 2: South round 1st place with a lead. Damaten preserves safety.
     if bad_wait and hand_value < 8000:
-        if not (gs.is_all_last and gs.my_placement == 1
-                and gs.diff_to_below <= abs(gs.noten_penalty_effect())):
-            return False
+        if gs.is_all_last and gs.my_placement == 1 and gs.diff_to_below <= abs(gs.noten_penalty_effect()):
+            return True
+        if gs.is_south and gs.my_placement == 1 and gs.diff_to_below >= 4000:
+            return True
+        # All-last 2nd/3rd: placement protection overrides bad-wait riichi preference.
+        # Riichi stick cost (1000pts) can flip placement, so damaten despite bad wait.
+        # EXCEPTION: extremely thin wait (≤2 tiles) — riichi intimidation is more
+        # valuable because tsumo chance is near zero anyway.
+        if total_remaining >= 3:
+            if gs.is_all_last and gs.my_placement == 2 and gs.diff_to_below < 4000:
+                return True
+            if gs.is_all_last and gs.my_placement == 3 and gs.diff_to_below < 2000:
+                return True
+            # All-last 3rd: if climbing to 2nd requires low han and gap is small,
+            # damaten to maximize chance of out-agari even with bad wait
+            if gs.is_all_last and gs.my_placement == 3 and gs.diff_to_above <= 4000:
+                pts_for_2nd = gs.points_needed_for_placement(2)
+                han_for_2nd = gs.min_han_for_points(pts_for_2nd, is_tsumo=False)
+                if han_for_2nd <= 2:
+                    return True
+        return False
 
     # === All-last 1st place ===
     if gs.is_all_last and gs.my_placement == 1:
@@ -393,7 +434,7 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
         if lead <= 4000:
             kyotaku_bonus = gs.kyotaku * 1000
             if kyotaku_bonus >= 2000:
-                return False
+                return True
             # With good wait (tile-level): damaten to protect lead
             if total_remaining >= 6 and num_wait_kinds >= 2:
                 return True
@@ -404,7 +445,7 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
 
         kyotaku_bonus = gs.kyotaku * 1000
         if kyotaku_bonus >= 2000:
-            return False
+            return True
         # Good mountain = damaten viable even with moderate hand value
         if total_remaining >= 8 and hand_value >= 2000:
             return True
@@ -421,8 +462,49 @@ def should_damaten(gs: GameState, adj: PlacementAdjustment,
         if total_remaining >= 8 and num_wait_kinds >= 2 and lead >= 4000:
             return True
 
-    # === Any placement: haneman+ closed hand with GOOD wait ===
-    if hand_value >= 12000 and not gs.my_info.is_open() and not bad_wait:
+    # === All-last 2nd place: protect against 3rd ===
+    # When 3rd is close, riichi stick (1000pts) narrows the gap dangerously.
+    # Top players prefer damaten to preserve the safety margin.
+    if gs.is_all_last and gs.my_placement == 2:
+        lead_to_3rd = gs.diff_to_below
+        if lead_to_3rd < 4000:
+            # Thin lead: damaten to avoid 1000pt riichi stick loss
+            return True
+        pts_for_1st = gs.points_needed_for_placement(1)
+        han_direct = 99
+        for i, p in enumerate(gs.players):
+            if i != gs.player_id and p.score >= max(pp.score for pp in gs.players):
+                dp = gs.points_needed_direct_hit(i, 1)
+                han_direct = gs.min_han_for_points(dp, is_tsumo=False)
+                break
+        # Direct hit 1st with low han: damaten for surprise (hide tenpai)
+        if han_direct <= 2 and hand_value >= 2000:
+            return True
+
+    # === All-last 3rd place: speed agari to escape 4th ===
+    # When 2nd is close, damaten for fast out-agari is viable.
+    # Top players damaten when the point condition is simple (1-2 han enough).
+    if gs.is_all_last and gs.my_placement == 3:
+        pts_for_2nd = gs.points_needed_for_placement(2)
+        han_for_2nd = gs.min_han_for_points(pts_for_2nd, is_tsumo=False)
+        if han_for_2nd <= 2 and gs.diff_to_above <= 4000:
+            return True
+        # 4th is close: damaten to avoid riichi stick narrowing the gap
+        if gs.diff_to_below < 2000:
+            return True
+
+    # === Any placement: haneman+ closed hand (almost always damaten) ===
+    if hand_value >= 12000 and not gs.my_info.is_open():
         return True
+
+    # === Any placement: mangan closed hand ===
+    if hand_value >= 8000 and not gs.my_info.is_open():
+        # Top players damaten Mangan if the wait is bad (avoid 1000pt risk / preserve flexibility)
+        if bad_wait:
+            return True
+        # If good wait, damaten is still strong to ensure win (minimize opponents' fold rate)
+        # especially when we are 1st or 2nd and want to protect our position without risking 1000pts.
+        if not bad_wait and gs.my_placement <= 2:
+            return True
 
     return False

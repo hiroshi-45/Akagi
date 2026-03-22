@@ -221,6 +221,22 @@ class PlayerInfo:
         if self.detect_toitoi_signal():
             han += 2  # open toitoi
 
+        # Open Tanyao (断么九)
+        all_tanyao = True
+        for m in self.melds:
+            for t in m.tiles:
+                if t in HONORS:
+                    all_tanyao = False
+                    break
+                s, r, _ = parse_tile(t)
+                if r is not None and (r == 1 or r == 9):
+                    all_tanyao = False
+                    break
+            if not all_tanyao:
+                break
+        if all_tanyao and len(self.melds) >= 1:
+            han += 1  # open tanyao
+
         # Dora in melds
         if doras:
             for m in self.melds:
@@ -266,7 +282,8 @@ class PlayerInfo:
 
     def apparent_threat_level(self, current_turn: int = 0,
                               round_wind: str = "E",
-                              seat_wind: str = "E") -> float:
+                              seat_wind: str = "E",
+                              doras: list = None) -> float:
         """Heuristic threat level from discards, melds, and behavioral patterns.
 
         Enhanced with:
@@ -317,6 +334,19 @@ class PlayerInfo:
             if target_suit is not None:
                 threat += 0.8 if n >= 3 else 0.5
 
+            # Dora pon detection
+            if doras:
+                dora_pon = False
+                for m in self.melds:
+                    if m.meld_type in ("pon", "daiminkan", "kakan") and len(m.tiles) > 0:
+                        t = tile_base(m.tiles[0])
+                        for d in doras:
+                            if t == d:
+                                dora_pon = True
+                                break
+                if dora_pon:
+                    threat += 1.0  # Huge threat
+
             # Toitoi signal
             if self.detect_toitoi_signal():
                 threat += 0.5
@@ -335,7 +365,10 @@ class PlayerInfo:
 
         # === Tedashi pattern: tsumogiri streak then tedashi = tenpai signal ===
         if not self.riichi_declared and self.tedashi_after_tsumogiri_streak():
-            threat += 0.6
+            if current_turn >= 7:
+                threat += 0.6
+            elif current_turn >= 4:
+                threat += 0.2
 
         # === Hand-cut content analysis ===
         # Discarding middle tiles (3-7) from hand = stronger hand signal
@@ -456,9 +489,15 @@ class GameState:
 
     @property
     def _active_players(self) -> List[int]:
-        """Indices of active players (excludes empty seats in 3p)."""
+        """Indices of active players (excludes empty seats in 3p).
+        
+        In 3-player mahjong, seat 3 (North) is always empty.
+        Previous logic used score > 0 which incorrectly excluded
+        players who reached exactly 0 points.
+        """
         if self.num_players == 3:
-            return [i for i in range(4) if self.players[i].score > 0 or i == self.player_id][:3]
+            # Sanma: seat 3 is always empty; seats 0, 1, 2 are active
+            return [i for i in range(3)]
         return list(range(4))
 
     @property
@@ -553,10 +592,15 @@ class GameState:
         return self.turn // self.num_players
 
     def count_dora_in_hand(self) -> int:
-        """Count dora tiles in my hand (fixed: no double-counting red dora)."""
+        """Count dora tiles in my hand AND my melds (fixed: no double-counting red dora)."""
         dora_list = self.doras
         count = 0
-        for t in self.my_hand:
+        
+        all_my_tiles = list(self.my_hand)
+        for m in self.my_melds:
+            all_my_tiles.extend(m.tiles)
+            
+        for t in all_my_tiles:
             base = tile_base(t)
             # Check normal dora match
             for d in dora_list:
@@ -592,6 +636,8 @@ class GameState:
         is_tenpai = (current_deficiency == 1 and len(self.my_hand) == 13)
 
         for idx in range(34):
+            if self.num_players == 3 and 1 <= idx <= 7:
+                continue
             remaining = max(0, 4 - self.visible_counts[idx])
             if remaining <= 0:
                 continue
@@ -644,6 +690,8 @@ class GameState:
         is_tenpai = (current_deficiency == 1 and len(self.my_hand) == 13)
 
         for idx in range(34):
+            if self.num_players == 3 and 1 <= idx <= 7:
+                continue
             remaining = max(0, 4 - self.visible_counts[idx])
             if remaining <= 0:
                 continue
@@ -699,7 +747,7 @@ class GameState:
     def _threat_of(self, seat: int) -> float:
         """Get threat level of a specific player with full context."""
         return self.players[seat].apparent_threat_level(
-            self.my_turn, self.round_wind, self._opponent_wind(seat))
+            self.my_turn, self.round_wind, self._opponent_wind(seat), self.doras)
 
     def threat_level_total(self) -> float:
         """Sum of all opponents' threat levels."""

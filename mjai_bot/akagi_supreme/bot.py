@@ -25,6 +25,7 @@ class Bot:
     def __init__(self):
         self.player_id: int = None
         self.model = None
+        self._engine = None
         self.model_module = model
         self._player_state = None  # libriichi PlayerState for shanten tracking
 
@@ -51,7 +52,7 @@ class Bot:
         for e in events:
             if e["type"] == "start_game":
                 self.player_id = e["id"]
-                self.model = self.model_module.load_model(self.player_id)
+                self.model, self._engine = self.model_module.load_model(self.player_id)
                 # Create a PlayerState for shanten tracking
                 self._init_player_state()
                 # Feed start_game to strategy engine
@@ -66,6 +67,7 @@ class Bot:
                 self._update_strategy(e)
                 self.player_id = None
                 self.model = None
+                self._engine = None
                 self._player_state = None
                 continue
 
@@ -89,23 +91,38 @@ class Bot:
 
         ot_settings = self.model_module._ot_settings
 
+        engine = self._get_supreme_engine()
+        thought = []
+        mortal_action = ""
+        supreme_action = ""
+        if engine is not None and hasattr(engine, "strategy"):
+            thought = getattr(engine.strategy, "last_thought", [])
+            mortal_action = getattr(engine.strategy, "last_mortal_action_name", "")
+            supreme_action = getattr(engine.strategy, "last_supreme_action_name", "")
+
         if return_action is None:
+            raw_data = {
+                "type": "none",
+                "meta": {
+                    "thought": thought,
+                    "mortal_action": mortal_action,
+                    "supreme_action": supreme_action,
+                },
+            }
             if ot_settings.get('online'):
-                raw_data = {
-                    "type": "none",
-                    "meta": {"online": self._get_is_online()},
-                }
-                return_action = json.dumps(raw_data, separators=(",", ":"))
-            else:
-                return_action = json.dumps({"type": "none"}, separators=(",", ":"))
+                raw_data["meta"]["online"] = self._get_is_online()
+            return_action = json.dumps(raw_data, separators=(",", ":"))
             return return_action
         else:
+            raw_data = json.loads(return_action)
+            if "meta" not in raw_data:
+                raw_data["meta"] = {}
+            raw_data["meta"]["thought"] = thought
+            raw_data["meta"]["mortal_action"] = mortal_action
+            raw_data["meta"]["supreme_action"] = supreme_action
             if ot_settings.get('online'):
-                raw_data = json.loads(return_action)
-                if "meta" not in raw_data:
-                    raw_data["meta"] = {}
                 raw_data["meta"]["online"] = self._get_is_online()
-                return_action = json.dumps(raw_data, separators=(",", ":"))
+            return_action = json.dumps(raw_data, separators=(",", ":"))
             return return_action
 
     def _init_player_state(self) -> None:
@@ -140,13 +157,8 @@ class Bot:
                 logger.warning(f"Strategy update failed: {e}")
 
     def _get_supreme_engine(self):
-        """Get the SupremeEngine from the model's engine."""
-        if self.model is not None and hasattr(self.model, 'engine'):
-            engine = self.model.engine
-            from .supreme_engine import SupremeEngine
-            if isinstance(engine, SupremeEngine):
-                return engine
-        return None
+        """Get the SupremeEngine directly cached from load_model."""
+        return self._engine
 
     def _get_is_online(self) -> bool:
         """Check if the model's engine is currently online."""
