@@ -614,23 +614,23 @@ class TestTanyaoDetection:
     def test_tanyao_hand_higher_value(self):
         """Hand with all 2-8 tiles should estimate higher due to tanyao.
 
-        Add 1 dora so the extra han from tanyao crosses a point threshold:
-        - Tanyao hand: tanyao(1) + dora(1) + riichi(1) + ura(0.3) = 3.3 → 3han → 3900
-        - No-tanyao hand: dora(1) + riichi(1) + ura(0.3) = 2.3 → 2han → 2000
+        Use 2 dora so the extra han from tanyao crosses a point threshold:
+        - Tanyao hand: tanyao(1) + dora(2) + menzen(0.7) = 3.7 → 3han → 3900
+        - No-tanyao hand: dora(2) + menzen(0.7) = 2.7 → 2han → 2000
         """
         gs_tanyao = GameState()
         gs_tanyao._initialized = True
         gs_tanyao.player_id = 0
         gs_tanyao.dealer = 1
         gs_tanyao.my_hand = ["2m", "3m", "4m", "5p", "6p", "7p", "2s", "3s", "4s", "5s", "6s", "7s", "8s"]
-        gs_tanyao.dora_indicators = ["4p"]  # dora = 5p, in both hands
+        gs_tanyao.dora_indicators = ["4p", "6s"]  # dora = 5p and 7s
 
         gs_no_tanyao = GameState()
         gs_no_tanyao._initialized = True
         gs_no_tanyao.player_id = 0
         gs_no_tanyao.dealer = 1
         gs_no_tanyao.my_hand = ["1m", "2m", "3m", "5p", "6p", "7p", "1s", "2s", "3s", "5s", "6s", "7s", "9s"]
-        gs_no_tanyao.dora_indicators = ["4p"]  # dora = 5p, in both hands
+        gs_no_tanyao.dora_indicators = ["4p", "6s"]  # dora = 5p and 7s
 
         val_tanyao = estimate_hand_value(gs_tanyao)
         val_no_tanyao = estimate_hand_value(gs_no_tanyao)

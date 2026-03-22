@@ -108,10 +108,14 @@ def estimate_hand_value(gs: GameState) -> float:
         elif dominant_suit_count + suit_counts["z"] >= len(hand) - 2:
             han_estimate += 0.5  # possible honitsu
 
-    # === Riichi potential for closed hand ===
+    # === Menzen bonus for closed hand ===
+    # Closed hands CAN declare riichi (+1 han + ura dora), but we don't
+    # know at estimation time whether we actually will. Use a discounted
+    # value: menzen tsumo (0.5 probability-weighted) + riichi option value.
+    # Full riichi value (1.0 + 0.3 ura) was too aggressive — it inflated
+    # hand value for dama/fold situations where riichi won't happen.
     if not gs.my_info.is_open():
-        han_estimate += 1.0  # riichi
-        han_estimate += 0.3  # ippatsu/ura dora average contribution
+        han_estimate += 0.7  # discounted riichi option value
 
     # === Convert han estimate to points ===
     if han_estimate >= 11:
@@ -155,10 +159,14 @@ def estimate_risk_of_deal_in(gs: GameState) -> float:
     elif n_riichi == 1:
         for i, p in enumerate(gs.players):
             if i != gs.player_id and p.riichi_declared:
-                if p.riichi_turn <= 6:
-                    base_risk *= 1.3  # early riichi = likely good hand
                 if p.is_dealer:
-                    base_risk *= 1.5  # dealer riichi is expensive
+                    # Dealer riichi: base cost is much higher (dealer mangan
+                    # = 12000). Top players treat dealer riichi as 1.5-2x
+                    # the danger of non-dealer riichi.
+                    base_risk *= 1.6
+                if p.riichi_turn <= 6:
+                    # Early riichi = likely good hand (good shape, dora, etc.)
+                    base_risk *= 1.3
 
     # Open hands with estimated point values
     for i, p in enumerate(gs.players):
@@ -211,8 +219,9 @@ def evaluate_push_fold(gs: GameState, shanten: int,
     # === Tenpai: almost always push ===
     if shanten <= 0:
         # Only exception: extremely cheap bad-shape tenpai vs extreme threat
-        # in very late game. Even then, top players usually push.
-        if threat >= 3.5 and hand_value < 2000 and my_turn >= 14 and bad_shape:
+        # in very late game. Top players mawashi when the expected gain
+        # from pushing is far less than the expected loss from deal-in.
+        if threat >= 3.0 and hand_value < 3900 and my_turn >= 14 and bad_shape:
             return PushFoldResult(
                 Decision.MAWASHI, 0.6,
                 "tenpai but cheap bad-shape vs extreme threat, very late"
@@ -393,20 +402,13 @@ def adjust_for_placement(result: PushFoldResult, gs: GameState) -> PushFoldResul
         if placement == 4:
             # All-last 4th: 4th is already the worst outcome in ranked
             # mahjong (-30 uma). Any chance to climb is worth taking.
-            # Top players push with almost any hand here.
-            if result.decision == Decision.FOLD:
-                # Even large deficits: push or mawashi, never give up
-                return PushFoldResult(
-                    Decision.PUSH if diff_above <= 16000 else Decision.MAWASHI,
-                    0.8,
-                    "all-last 4th, must recover"
-                )
-            if result.decision == Decision.MAWASHI:
-                # Upgrade mawashi to push — speed is everything
+            # Top players push with almost any hand here — even with huge
+            # deficits, because dealing in doesn't worsen 4th place.
+            if result.decision in (Decision.FOLD, Decision.MAWASHI):
                 return PushFoldResult(
                     Decision.PUSH,
-                    0.8,
-                    "all-last 4th, push for any chance"
+                    0.85,
+                    "all-last 4th, must push regardless of deficit"
                 )
             return result
 
@@ -422,10 +424,19 @@ def adjust_for_placement(result: PushFoldResult, gs: GameState) -> PushFoldResul
                 )
         if placement == 4:
             # South 4th: need to recover before all-last.
-            # Top players push aggressively to avoid finishing 4th.
+            # Top players push more aggressively but not recklessly —
+            # unlike all-last, there are still rounds left to recover.
+            # Jumping from FOLD straight to PUSH risks unnecessary deal-ins.
             if diff_above >= 20000:
-                # Very desperate: fold/mawashi → push directly
-                if result.decision in (Decision.FOLD, Decision.MAWASHI):
+                # Very desperate: upgrade fold to mawashi (not push —
+                # still rounds left, and a big deal-in makes it worse)
+                if result.decision == Decision.FOLD:
+                    return PushFoldResult(
+                        Decision.MAWASHI,
+                        result.confidence,
+                        f"south 4th, big deficit, at least mawashi: {result.reason}"
+                    )
+                if result.decision == Decision.MAWASHI:
                     return PushFoldResult(
                         Decision.PUSH,
                         result.confidence,
