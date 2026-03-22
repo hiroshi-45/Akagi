@@ -115,7 +115,7 @@ def estimate_hand_value(gs: GameState) -> float:
 
     # === Convert han estimate to points ===
     if han_estimate >= 11:
-        value = 32000.0 if gs.is_dealer_me else 24000.0
+        value = 36000.0 if gs.is_dealer_me else 24000.0
     elif han_estimate >= 8:
         value = 24000.0 if gs.is_dealer_me else 16000.0
     elif han_estimate >= 6:
@@ -147,10 +147,11 @@ def estimate_risk_of_deal_in(gs: GameState) -> float:
     """
     base_risk = 5200.0  # average deal-in cost
 
-    # Riichi opponents
+    # Riichi opponents — double riichi is extremely dangerous because
+    # two independent threats means many more tiles are dangerous.
     n_riichi = gs.num_riichi_opponents
     if n_riichi >= 2:
-        base_risk *= 1.5
+        base_risk *= 1.8
     elif n_riichi == 1:
         for i, p in enumerate(gs.players):
             if i != gs.player_id and p.riichi_declared:
@@ -361,29 +362,42 @@ def adjust_for_placement(result: PushFoldResult, gs: GameState) -> PushFoldResul
             # Top players push tenpai/good iishanten here to secure 1st.
             if diff_below < 4000:
                 return result  # keep original decision, don't weaken to mawashi
-            # Comfortable lead: be more defensive
+            # Comfortable lead: top players fully fold to protect placement.
+            # MAWASHI still risks deal-in; FOLD is the safe choice.
+            if diff_below >= 12000:
+                if result.decision == Decision.PUSH:
+                    return PushFoldResult(
+                        Decision.FOLD,
+                        result.confidence,
+                        f"all-last 1st, big lead, full fold: {result.reason}"
+                    )
+                return result
+            # Moderate lead (4000-12000): mawashi to avoid unnecessary risk
             if result.decision == Decision.PUSH:
                 return PushFoldResult(
                     Decision.MAWASHI,
                     result.confidence,
-                    f"all-last 1st place, comfortable lead, careful: {result.reason}"
+                    f"all-last 1st place, moderate lead, careful: {result.reason}"
                 )
             return result
 
         if placement == 4:
-            # All-last 4th: 4th is already the worst outcome.
-            # Any chance to climb is worth taking — always push harder.
+            # All-last 4th: 4th is already the worst outcome in ranked
+            # mahjong (-30 uma). Any chance to climb is worth taking.
+            # Top players push with almost any hand here.
             if result.decision == Decision.FOLD:
+                # Even large deficits: push or mawashi, never give up
                 return PushFoldResult(
-                    Decision.PUSH if diff_above <= 8000 else Decision.MAWASHI,
+                    Decision.PUSH if diff_above <= 16000 else Decision.MAWASHI,
                     0.8,
                     "all-last 4th, must recover"
                 )
-            if result.decision == Decision.MAWASHI and diff_above <= 12000:
+            if result.decision == Decision.MAWASHI:
+                # Upgrade mawashi to push — speed is everything
                 return PushFoldResult(
                     Decision.PUSH,
                     0.8,
-                    "all-last 4th, reachable deficit"
+                    "all-last 4th, push for any chance"
                 )
             return result
 
@@ -397,19 +411,24 @@ def adjust_for_placement(result: PushFoldResult, gs: GameState) -> PushFoldResul
                     result.confidence,
                     f"south, leading comfortably: {result.reason}"
                 )
-        if placement == 4 and diff_above >= 20000:
-            # Desperate: upgrade fold/mawashi to push
-            if result.decision == Decision.FOLD:
-                return PushFoldResult(
-                    Decision.MAWASHI,
-                    result.confidence,
-                    f"south 4th, desperate: {result.reason}"
-                )
-            if result.decision == Decision.MAWASHI:
-                return PushFoldResult(
-                    Decision.PUSH,
-                    result.confidence,
-                    f"south 4th, desperate push: {result.reason}"
-                )
+        if placement == 4:
+            # South 4th: need to recover before all-last.
+            # Top players push aggressively to avoid finishing 4th.
+            if diff_above >= 20000:
+                # Very desperate: fold/mawashi → push directly
+                if result.decision in (Decision.FOLD, Decision.MAWASHI):
+                    return PushFoldResult(
+                        Decision.PUSH,
+                        result.confidence,
+                        f"south 4th, desperate push: {result.reason}"
+                    )
+            elif diff_above >= 8000:
+                # Moderate deficit: at least mawashi
+                if result.decision == Decision.FOLD:
+                    return PushFoldResult(
+                        Decision.MAWASHI,
+                        result.confidence,
+                        f"south 4th, moderate deficit: {result.reason}"
+                    )
 
     return result

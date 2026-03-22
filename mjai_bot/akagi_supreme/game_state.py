@@ -93,6 +93,7 @@ class PlayerInfo:
     _consecutive_tsumogiri: int = 0
     _last_tedashi_turn: int = 0
     _tedashi_count: int = 0  # total tedashi count this round
+    _tsumogiri_streak_tedashi: bool = False  # True once tedashi follows 3+ tsumogiri
     # Post-riichi genbutsu: tiles discarded by others that this riichi
     # player passed on (didn't ron). Safe to discard against them.
     post_riichi_safe: Set[Tile] = field(default_factory=set)
@@ -238,11 +239,13 @@ class PlayerInfo:
         return _calculate_points(han, fu, self.is_dealer, False)
 
     def tedashi_after_tsumogiri_streak(self) -> bool:
-        """Whether last event was tedashi after a streak of tsumogiri.
+        """Whether a tedashi occurred after a streak of 3+ tsumogiri.
 
         This is a strong tenpai signal used by top players.
+        Once detected, stays True for the rest of the round (damaten signal
+        doesn't disappear just because the player draws again).
         """
-        return self._consecutive_tsumogiri >= 3 and self._tedashi_count > 0
+        return self._tsumogiri_streak_tedashi
 
     def detect_honitsu_from_river(self) -> Optional[str]:
         """Detect honitsu tendency from river discards (works for closed hands too).
@@ -413,6 +416,7 @@ class GameState:
             p._consecutive_tsumogiri = 0
             p._last_tedashi_turn = 0
             p._tedashi_count = 0
+            p._tsumogiri_streak_tedashi = False
 
     def reset_game(self) -> None:
         self._initialized = False
@@ -895,6 +899,9 @@ class GameState:
         if tsumogiri:
             player._consecutive_tsumogiri += 1
         else:
+            # Tedashi after 3+ consecutive tsumogiri = strong tenpai signal
+            if player._consecutive_tsumogiri >= 3:
+                player._tsumogiri_streak_tedashi = True
             player._consecutive_tsumogiri = 0
             player._tedashi_count += 1
             player._last_tedashi_turn = self.turn

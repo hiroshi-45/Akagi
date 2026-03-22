@@ -208,12 +208,11 @@ class StrategyEngine:
         none_q = q_values[ac.idx_none] if ac.idx_none < len(q_values) else 0.0
         meld_q = q_values[best_meld]
 
-        # All-last 4th: take almost any meld (worst placement, nothing to
-        # lose). Top players know 4th is already the worst outcome, so any
-        # chance to speed up the hand is worth taking.
+        # All-last 4th: take ANY meld (worst placement, nothing to lose).
+        # Top players know 4th is already the worst outcome, so every
+        # chance to speed up the hand is worth taking. No Q-value gate.
         if gs.my_placement == 4:
-            if meld_q >= none_q - 0.45:
-                return best_meld
+            return best_meld
 
         # All-last 3rd with 4th close: need speed to stay safe
         if gs.my_placement == 3 and gs.diff_to_below < 4000:
@@ -316,7 +315,8 @@ class StrategyEngine:
                     return ac.idx_none
 
         # === In FOLD: skip chi entirely, very cautious with pon ===
-        if pf_result.decision == Decision.FOLD:
+        # Exception: all-last 4th should never fold — meld for speed.
+        if pf_result.decision == Decision.FOLD and not (gs.is_all_last and gs.my_placement == 4):
             if mortal_action in ac.chi_indices:
                 if ac.idx_none < len(mask) and mask[ac.idx_none]:
                     return ac.idx_none
@@ -367,6 +367,11 @@ class StrategyEngine:
 
         # Already has melds — no menzen to lose
         if gs.my_melds:
+            return 0.0
+
+        # All-last 4th: speed is everything, no menzen penalty.
+        # 4th is already the worst outcome; meld for any chance to climb.
+        if gs.is_all_last and gs.my_placement == 4:
             return 0.0
 
         # Chi breaks menzen more than pon in terms of hand structure options

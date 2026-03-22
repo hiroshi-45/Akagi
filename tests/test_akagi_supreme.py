@@ -575,12 +575,12 @@ class TestAllLastPlacementFixes:
         # Thin lead — should keep PUSH, not downgrade to MAWASHI
         assert adjusted.decision == Decision.PUSH
 
-    def test_all_last_1st_big_lead_mawashi(self):
-        """All-last 1st with big lead: convert to MAWASHI for safety."""
+    def test_all_last_1st_big_lead_fold(self):
+        """All-last 1st with big lead: convert to FOLD for full safety."""
         gs = self._make_gs(scores=[40000, 25000, 20000, 15000])
         original = PushFoldResult(Decision.PUSH, 0.9, "tenpai")
         adjusted = adjust_for_placement(original, gs)
-        assert adjusted.decision == Decision.MAWASHI
+        assert adjusted.decision == Decision.FOLD
 
     def test_all_last_4th_fold_upgraded(self):
         """All-last 4th should upgrade FOLD — nothing to lose."""
@@ -718,6 +718,7 @@ class TestDamaTenpaiRisk:
         # Set up player 2 with tsumogiri streak then tedashi
         gs.players[2]._consecutive_tsumogiri = 4
         gs.players[2]._tedashi_count = 1
+        gs.players[2]._tsumogiri_streak_tedashi = True
 
         risk = estimate_risk_of_deal_in(gs)
         # Should be at least 7700 (mangan-level) due to dama signal

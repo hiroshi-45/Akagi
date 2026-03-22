@@ -277,12 +277,16 @@ def _south_strategy(gs: GameState, placement: int,
 def _east_strategy(gs: GameState, placement: int,
                     diff_above: int, diff_below: int,
                     is_dealer: bool) -> PlacementAdjustment:
-    """Strategy for east round — mostly standard but with dealer awareness."""
+    """Strategy for east round — mostly standard but with dealer awareness.
+
+    Top players value dealer position highly (renchan = extra scoring
+    opportunity). Dealer should be noticeably more aggressive.
+    """
     if is_dealer:
         return PlacementAdjustment(
-            riichi_multiplier=1.05,
-            meld_multiplier=1.05,
-            reason="east dealer, slight aggression"
+            riichi_multiplier=1.1,
+            meld_multiplier=1.1,
+            reason="east dealer, aggression for renchan value"
         )
 
     return PlacementAdjustment(reason="east round, standard play")
