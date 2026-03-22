@@ -405,3 +405,222 @@ class TestDamaten:
         adj = compute_placement_adjustment(gs)
         result = should_damaten(gs, adj, hand_value=2000, acceptance_count=2)
         assert result is False
+
+
+# ============================================================
+# Mentsu extraction order fix tests
+# ============================================================
+
+class TestMentsuExtractionOrder:
+    """Test that _count_mentsu_and_partial handles both extraction orders."""
+
+    def test_kotsu_then_shuntsu_better(self):
+        """1m1m1m 2m3m4m: kotsu-first gives 2 mentsu, shuntsu-first gives 1."""
+        from mjai_bot.akagi_supreme.game_state import _count_mentsu_and_partial, _hand_to_34
+        hand = ["1m", "1m", "1m", "2m", "3m", "4m"]
+        counts = _hand_to_34(hand)
+        mentsu, partial = _count_mentsu_and_partial(counts)
+        assert mentsu == 2  # 111m + 234m
+
+    def test_shuntsu_first_better(self):
+        """1m2m3m 4m5m6m: shuntsu-first gives 2, kotsu-first might miss."""
+        from mjai_bot.akagi_supreme.game_state import _count_mentsu_and_partial, _hand_to_34
+        hand = ["1m", "2m", "3m", "4m", "5m", "6m"]
+        counts = _hand_to_34(hand)
+        mentsu, partial = _count_mentsu_and_partial(counts)
+        assert mentsu == 2  # 123m + 456m
+
+    def test_mixed_optimal(self):
+        """2m2m2m 3m4m5m 6m6m6m: both orders should find 3 mentsu."""
+        from mjai_bot.akagi_supreme.game_state import _count_mentsu_and_partial, _hand_to_34
+        hand = ["2m", "2m", "2m", "3m", "4m", "5m", "6m", "6m", "6m"]
+        counts = _hand_to_34(hand)
+        mentsu, partial = _count_mentsu_and_partial(counts)
+        assert mentsu == 3
+
+
+# ============================================================
+# Post-riichi genbutsu tracking tests
+# ============================================================
+
+class TestPostRiichiGenbutsu:
+    """Test that tiles passed on by riichi players are tracked as safe."""
+
+    def test_post_riichi_safe_tiles(self):
+        gs = GameState()
+        gs.process_event({"type": "start_game", "id": 0})
+        gs.process_event({
+            "type": "start_kyoku", "bakaze": "E", "kyoku": 1,
+            "honba": 0, "kyotaku": 0, "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E", "P", "P"],
+                ["?"] * 13, ["?"] * 13, ["?"] * 13
+            ]
+        })
+        # Player 1 declares riichi
+        gs.process_event({"type": "tsumo", "actor": 1, "pai": "?"})
+        gs.process_event({"type": "reach", "actor": 1})
+        gs.process_event({"type": "dahai", "actor": 1, "pai": "9m", "tsumogiri": False})
+        gs.process_event({"type": "reach_accepted", "actor": 1})
+
+        # Player 2 discards 5s — riichi player 1 doesn't call ron
+        gs.process_event({"type": "tsumo", "actor": 2, "pai": "?"})
+        gs.process_event({"type": "dahai", "actor": 2, "pai": "5s", "tsumogiri": True})
+
+        # 5s should be tracked as safe against player 1
+        assert "5s" in gs.players[1].post_riichi_safe
+
+    def test_post_riichi_safe_red_normalized(self):
+        gs = GameState()
+        gs.process_event({"type": "start_game", "id": 0})
+        gs.process_event({
+            "type": "start_kyoku", "bakaze": "E", "kyoku": 1,
+            "honba": 0, "kyotaku": 0, "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E", "P", "P"],
+                ["?"] * 13, ["?"] * 13, ["?"] * 13
+            ]
+        })
+        gs.process_event({"type": "tsumo", "actor": 1, "pai": "?"})
+        gs.process_event({"type": "reach", "actor": 1})
+        gs.process_event({"type": "dahai", "actor": 1, "pai": "8p", "tsumogiri": False})
+        gs.process_event({"type": "reach_accepted", "actor": 1})
+
+        # Player 2 discards 5mr — should be normalized to "5m"
+        gs.process_event({"type": "tsumo", "actor": 2, "pai": "?"})
+        gs.process_event({"type": "dahai", "actor": 2, "pai": "5mr", "tsumogiri": True})
+
+        assert "5m" in gs.players[1].post_riichi_safe
+
+
+# ============================================================
+# Last discard tracking tests
+# ============================================================
+
+class TestLastDiscardTracking:
+    def test_last_discard_tracked(self):
+        gs = GameState()
+        gs.process_event({"type": "start_game", "id": 0})
+        gs.process_event({
+            "type": "start_kyoku", "bakaze": "E", "kyoku": 1,
+            "honba": 0, "kyotaku": 0, "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E", "P", "P"],
+                ["?"] * 13, ["?"] * 13, ["?"] * 13
+            ]
+        })
+        gs.process_event({"type": "tsumo", "actor": 1, "pai": "?"})
+        gs.process_event({"type": "dahai", "actor": 1, "pai": "9m", "tsumogiri": True})
+        assert gs._last_discard_tile == "9m"
+        assert gs._last_discard_actor == 1
+
+        gs.process_event({"type": "tsumo", "actor": 2, "pai": "?"})
+        gs.process_event({"type": "dahai", "actor": 2, "pai": "E", "tsumogiri": False})
+        assert gs._last_discard_tile == "E"
+        assert gs._last_discard_actor == 2
+
+    def test_own_discard_not_tracked(self):
+        """Own discards should not update _last_discard_tile."""
+        gs = GameState()
+        gs.process_event({"type": "start_game", "id": 0})
+        gs.process_event({
+            "type": "start_kyoku", "bakaze": "E", "kyoku": 1,
+            "honba": 0, "kyotaku": 0, "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E", "P", "P"],
+                ["?"] * 13, ["?"] * 13, ["?"] * 13
+            ]
+        })
+        gs.process_event({"type": "tsumo", "actor": 1, "pai": "?"})
+        gs.process_event({"type": "dahai", "actor": 1, "pai": "W", "tsumogiri": True})
+        # Our discard shouldn't overwrite
+        gs.process_event({"type": "tsumo", "actor": 0, "pai": "N"})
+        gs.process_event({"type": "dahai", "actor": 0, "pai": "N", "tsumogiri": True})
+        assert gs._last_discard_tile == "W"  # still player 1's discard
+
+
+# ============================================================
+# All-last placement adjustment fix tests
+# ============================================================
+
+class TestAllLastPlacementFixes:
+    def _make_gs(self, **kwargs) -> GameState:
+        gs = GameState()
+        gs._initialized = True
+        gs.player_id = kwargs.get("player_id", 0)
+        gs.dealer = kwargs.get("dealer", 1)
+        gs.round_wind = kwargs.get("round_wind", "S")
+        gs.round_number = kwargs.get("round_number", 4)
+        if "scores" in kwargs:
+            for i, s in enumerate(kwargs["scores"]):
+                gs.players[i].score = s
+        return gs
+
+    def test_all_last_1st_thin_lead_keeps_push(self):
+        """All-last 1st with thin lead (<4000): keep pushing to secure 1st."""
+        gs = self._make_gs(scores=[26000, 25000, 24000, 25000])
+        original = PushFoldResult(Decision.PUSH, 0.9, "tenpai")
+        adjusted = adjust_for_placement(original, gs)
+        # Thin lead — should keep PUSH, not downgrade to MAWASHI
+        assert adjusted.decision == Decision.PUSH
+
+    def test_all_last_1st_big_lead_mawashi(self):
+        """All-last 1st with big lead: convert to MAWASHI for safety."""
+        gs = self._make_gs(scores=[40000, 25000, 20000, 15000])
+        original = PushFoldResult(Decision.PUSH, 0.9, "tenpai")
+        adjusted = adjust_for_placement(original, gs)
+        assert adjusted.decision == Decision.MAWASHI
+
+    def test_all_last_4th_fold_upgraded(self):
+        """All-last 4th should upgrade FOLD — nothing to lose."""
+        gs = self._make_gs(scores=[15000, 30000, 25000, 30000])
+        original = PushFoldResult(Decision.FOLD, 0.7, "far from tenpai")
+        adjusted = adjust_for_placement(original, gs)
+        assert adjusted.decision in (Decision.PUSH, Decision.MAWASHI)
+
+    def test_all_last_4th_big_deficit_still_upgrades(self):
+        """All-last 4th with huge deficit still upgrades — 4th is worst outcome."""
+        gs = self._make_gs(scores=[10000, 35000, 30000, 25000])
+        original = PushFoldResult(Decision.FOLD, 0.7, "desperate")
+        adjusted = adjust_for_placement(original, gs)
+        # Should at least upgrade to MAWASHI (even with huge deficit)
+        assert adjusted.decision != Decision.FOLD
+
+
+# ============================================================
+# Tanyao detection test
+# ============================================================
+
+class TestTanyaoDetection:
+    def test_tanyao_hand_higher_value(self):
+        """Hand with all 2-8 tiles should estimate higher due to tanyao.
+
+        Add 1 dora so the extra han from tanyao crosses a point threshold:
+        - Tanyao hand: tanyao(1) + dora(1) + riichi(1) + ura(0.3) = 3.3 → 3han → 3900
+        - No-tanyao hand: dora(1) + riichi(1) + ura(0.3) = 2.3 → 2han → 2000
+        """
+        gs_tanyao = GameState()
+        gs_tanyao._initialized = True
+        gs_tanyao.player_id = 0
+        gs_tanyao.dealer = 1
+        gs_tanyao.my_hand = ["2m", "3m", "4m", "5p", "6p", "7p", "2s", "3s", "4s", "5s", "6s", "7s", "8s"]
+        gs_tanyao.dora_indicators = ["4p"]  # dora = 5p, in both hands
+
+        gs_no_tanyao = GameState()
+        gs_no_tanyao._initialized = True
+        gs_no_tanyao.player_id = 0
+        gs_no_tanyao.dealer = 1
+        gs_no_tanyao.my_hand = ["1m", "2m", "3m", "5p", "6p", "7p", "1s", "2s", "3s", "5s", "6s", "7s", "9s"]
+        gs_no_tanyao.dora_indicators = ["4p"]  # dora = 5p, in both hands
+
+        val_tanyao = estimate_hand_value(gs_tanyao)
+        val_no_tanyao = estimate_hand_value(gs_no_tanyao)
+        assert val_tanyao > val_no_tanyao

@@ -77,6 +77,20 @@ def estimate_hand_value(gs: GameState) -> float:
             elif count >= 2:
                 han_estimate += 0.4  # possible pon
 
+    # === Tanyao potential (断么九) ===
+    # All tiles are 2-8 numbered tiles (no terminals or honors)
+    all_tanyao = True
+    for t in hand:
+        if t in HONORS:
+            all_tanyao = False
+            break
+        s, r, _ = parse_tile(t)
+        if r is not None and (r == 1 or r == 9):
+            all_tanyao = False
+            break
+    if all_tanyao and len(hand) >= 4:
+        han_estimate += 1.0  # tanyao
+
     # === Suit composition: honitsu/chinitsu potential ===
     suit_counts = {"m": 0, "p": 0, "s": 0, "z": 0}
     for t in hand:
@@ -325,24 +339,35 @@ def adjust_for_placement(result: PushFoldResult, gs: GameState) -> PushFoldResul
     # === All Last (オーラス) special logic ===
     if gs.is_all_last:
         if placement == 1:
-            # Leading: be more defensive
+            # Thin lead (< 4000): pushing to win is defensive — noten
+            # penalty (-3000) or opponent tsumo could flip placement.
+            # Top players push tenpai/good iishanten here to secure 1st.
+            if diff_below < 4000:
+                return result  # keep original decision, don't weaken to mawashi
+            # Comfortable lead: be more defensive
             if result.decision == Decision.PUSH:
                 return PushFoldResult(
                     Decision.MAWASHI,
                     result.confidence,
-                    f"all-last 1st place, careful: {result.reason}"
+                    f"all-last 1st place, comfortable lead, careful: {result.reason}"
                 )
             return result
 
         if placement == 4:
-            # Must recover: push harder
-            if diff_above <= 12000:
-                if result.decision in (Decision.FOLD, Decision.MAWASHI):
-                    return PushFoldResult(
-                        Decision.PUSH if diff_above <= 8000 else Decision.MAWASHI,
-                        0.8,
-                        "all-last 4th, reachable deficit"
-                    )
+            # All-last 4th: 4th is already the worst outcome.
+            # Any chance to climb is worth taking — always push harder.
+            if result.decision == Decision.FOLD:
+                return PushFoldResult(
+                    Decision.PUSH if diff_above <= 8000 else Decision.MAWASHI,
+                    0.8,
+                    "all-last 4th, must recover"
+                )
+            if result.decision == Decision.MAWASHI and diff_above <= 12000:
+                return PushFoldResult(
+                    Decision.PUSH,
+                    0.8,
+                    "all-last 4th, reachable deficit"
+                )
             return result
 
     # === South round general adjustments ===
