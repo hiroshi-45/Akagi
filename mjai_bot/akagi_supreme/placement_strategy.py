@@ -164,15 +164,16 @@ def _all_last_strategy(gs: GameState, placement: int,
         han_for_2nd = gs.min_han_for_points(pts_for_2nd, is_tsumo=False)
 
         if diff_below < 4000:
-            # 4th is dangerously close (≤1000): riichi stick (1000pt) directly
-            # risks dropping to 4th (ラス). Top players NEVER risk ラス for +1 han.
-            # prefer_damaten to protect against placement flip.
-            if diff_below <= 1000:
+            # 4th is close: riichi stick (1000pt) directly risks dropping
+            # to 4th (ラス). Top players prioritize ラス回避 above all else.
+            # When gap < 2000, the 1000pt riichi deposit narrows it to < 1000,
+            # making placement flip very likely on any mishap.
+            if diff_below < 2000:
                 return PlacementAdjustment(
                     riichi_multiplier=0.7,
                     meld_multiplier=1.1,
                     prefer_damaten=True,
-                    reason="all-last 3rd, 4th dangerously close (≤1000pts), protect against ラス"
+                    reason="all-last 3rd, 4th dangerously close (<2000pts), protect against ラス"
                 )
             if han_for_2nd <= 2:
                 return PlacementAdjustment(

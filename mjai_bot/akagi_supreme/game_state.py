@@ -842,12 +842,23 @@ class GameState:
         if my_s >= threshold_score and self.my_placement <= target_placement:
             return 0
 
-        # Direct hit: we gain X points, target loses X points
-        # New scores: my_s + X >= threshold, target_score - X (may drop)
-        # We need: my_s + X > threshold_score (or >= with seat priority)
-        needed = threshold_score - my_s
-        if self.player_id > threshold_seat:
-            needed += 100
+        # Direct hit: we gain X points, target loses X points.
+        # When target_seat IS the threshold player (e.g., hitting 1st to become 1st):
+        #   my_s + X >= threshold_s - X  =>  X >= (threshold_s - my_s) / 2
+        #   This halving is the key advantage of direct hit over tsumo.
+        # When target_seat is NOT the threshold player:
+        #   Target's loss doesn't affect the threshold score.
+        #   We simply need my_s + X >= threshold_score.
+        raw_diff = threshold_score - my_s
+        if target_seat == threshold_seat:
+            # Direct hit on the player we're trying to surpass:
+            # point transfer means we need roughly half the difference.
+            tiebreak = 100 if self.player_id > threshold_seat else 0
+            needed = (raw_diff + tiebreak + 1) // 2
+        else:
+            needed = raw_diff
+            if self.player_id > threshold_seat:
+                needed += 100
         return max(0, needed)
 
     def noten_penalty_effect(self) -> int:

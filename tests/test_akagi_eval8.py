@@ -1021,3 +1021,140 @@ class TestMawashiTileSelection:
         # Should pick S (idx 28) because it has the best Q-value among safe tiles
         assert result == 28, \
             f"MAWASHI should pick best Q-value among ALL safe tiles, got idx {result} (expected 28=S)"
+
+
+# ============================================================
+# Direct hit point calculation fix tests
+# ============================================================
+
+class TestDirectHitPointCalculation:
+    """Test that points_needed_direct_hit accounts for point transfer.
+
+    When you ron the player you're trying to surpass, both gain and loss
+    are X points, so you need roughly X >= (diff / 2) to reverse placement.
+    """
+
+    def _make_gs(self, **kwargs) -> GameState:
+        gs = GameState()
+        gs._initialized = True
+        gs.player_id = kwargs.get("player_id", 0)
+        gs.dealer = kwargs.get("dealer", 1)
+        gs.round_wind = "S"
+        gs.round_number = 4
+        gs._is_tonpu = False
+        gs.num_players = 4
+        if "scores" in kwargs:
+            for i, s in enumerate(kwargs["scores"]):
+                gs.players[i].score = s
+        return gs
+
+    def test_direct_hit_halves_requirement(self):
+        """Hitting 1st (30000) as 2nd (25000) should need ~2500, not 5000."""
+        gs = self._make_gs(scores=[25000, 30000, 20000, 15000])
+        # target_seat=1 (1st place), target_placement=1
+        pts = gs.points_needed_direct_hit(1, 1)
+        # Raw diff = 5000. Direct hit = ceil(5000/2) = 2500
+        assert pts <= 2600, \
+            f"Direct hit should need ~2500pts (half the 5000 gap), got {pts}"
+        assert pts >= 2400, \
+            f"Direct hit should need ~2500pts, got {pts}"
+
+    def test_direct_hit_tiebreak(self):
+        """With worse seat priority, need slightly more than half."""
+        # Player 0 (seat 0) trying to surpass player 1 (seat 1)
+        # Seat 0 < seat 1, so player 0 wins tiebreak → no extra needed
+        gs = self._make_gs(player_id=0, scores=[25000, 30000, 20000, 15000])
+        pts_good_seat = gs.points_needed_direct_hit(1, 1)
+
+        # Player 2 trying to surpass player 1 (seat 1)
+        # Seat 2 > seat 1, so player 2 loses tiebreak → needs extra
+        gs2 = self._make_gs(player_id=2, scores=[20000, 30000, 25000, 15000])
+        pts_bad_seat = gs2.points_needed_direct_hit(1, 1)
+
+        assert pts_bad_seat > pts_good_seat, \
+            f"Worse seat tiebreak should need more pts: bad={pts_bad_seat}, good={pts_good_seat}"
+
+    def test_direct_hit_already_ahead(self):
+        """If already at or above target placement, need 0."""
+        gs = self._make_gs(scores=[35000, 30000, 20000, 15000])
+        pts = gs.points_needed_direct_hit(1, 1)
+        assert pts == 0
+
+    def test_direct_hit_practical_han_check(self):
+        """2nd (25000) hitting 1st (30000): 3han should suffice, not 4han."""
+        gs = self._make_gs(scores=[25000, 30000, 20000, 15000])
+        pts = gs.points_needed_direct_hit(1, 1)
+        han = gs.min_han_for_points(pts, is_tsumo=False)
+        # 3han 30fu = 3900pts. With direct hit: 25000+3900=28900 vs 30000-3900=26100
+        # 28900 > 26100 → placement reversed. So 3 han is enough.
+        assert han <= 3, \
+            f"Direct hit 3han (3900pts) should suffice for 5000pt gap, got {han}han"
+
+    def test_direct_hit_on_different_target(self):
+        """When target_seat differs from threshold player, no halving."""
+        # Player 0 (3rd, 20000) wants 1st (35000) by hitting player 2 (25000)
+        # Player 2 is NOT 1st, so hitting them doesn't directly affect 1st's score
+        gs = self._make_gs(scores=[20000, 35000, 25000, 10000])
+        pts = gs.points_needed_direct_hit(2, 1)  # hit player 2, want 1st
+        # threshold is player 1 (35000). target is player 2.
+        # Since target != threshold, raw diff = 35000 - 20000 = 15000
+        assert pts >= 15000, \
+            f"Hitting non-threshold player should need full diff, got {pts}"
+
+
+# ============================================================
+# All-last 3rd prefer_damaten extended range test
+# ============================================================
+
+class TestAllLast3rdPreferDamatenExtended:
+    """Test that all-last 3rd prefers damaten when 4th is within 2000pts."""
+
+    def _make_gs(self, **kwargs) -> GameState:
+        gs = GameState()
+        gs._initialized = True
+        gs.player_id = kwargs.get("player_id", 0)
+        gs.dealer = kwargs.get("dealer", 1)
+        gs.round_wind = "S"
+        gs.round_number = 4
+        gs._is_tonpu = False
+        gs.num_players = 4
+        gs.my_hand = kwargs.get("my_hand", ["1m"] * 13)
+        gs.visible_counts = [0] * 34
+        gs.turn = kwargs.get("turn", 20)
+        if "scores" in kwargs:
+            for i, s in enumerate(kwargs["scores"]):
+                gs.players[i].score = s
+        return gs
+
+    def test_3rd_4th_gap_1500_prefers_damaten(self):
+        """All-last 3rd with 4th only 1500pts behind should prefer damaten.
+
+        Riichi deposit (1000pt) would narrow the gap to just 500pts,
+        making ラス回避 extremely precarious.
+        """
+        gs = self._make_gs(scores=[21500, 30000, 25000, 23500])
+        # Player 0 is 3rd (21500), 4th is 20000 → gap = 1500
+        # Wait, let me recalculate. Sorted: 30000(p1), 25000(p2), 23500(p3), 21500(p0)
+        # Player 0 is 4th... let me fix scores
+        gs2 = self._make_gs(scores=[23500, 30000, 25000, 22000])
+        # Sorted: 30000(p1), 25000(p2), 23500(p0), 22000(p3)
+        # Player 0 is 3rd, 4th is 22000, gap = 1500
+        adj = compute_placement_adjustment(gs2)
+        assert adj.prefer_damaten is True, \
+            f"All-last 3rd with 4th only 1500pts behind should prefer damaten, got: {adj.reason}"
+
+    def test_3rd_4th_gap_1000_still_prefers_damaten(self):
+        """All-last 3rd with 4th only 1000pts behind (previous threshold)."""
+        gs = self._make_gs(scores=[23000, 30000, 25000, 22000])
+        adj = compute_placement_adjustment(gs)
+        assert adj.prefer_damaten is True
+
+    def test_3rd_4th_gap_3000_no_damaten_unless_close_to_2nd(self):
+        """All-last 3rd with 4th 3000pts behind: damaten not forced by gap alone."""
+        gs = self._make_gs(scores=[25000, 40000, 35000, 22000])
+        # Player 0: 3rd (25000), 4th: 22000, gap = 3000
+        # 2nd: 35000, gap to 2nd = 10000 (far)
+        adj = compute_placement_adjustment(gs)
+        # Gap is 3000 (>= 2000), so prefer_damaten should NOT be set by gap-protection
+        assert adj.prefer_damaten is False, \
+            f"All-last 3rd with 4th 3000pts behind should not force damaten, got: {adj.reason}"
