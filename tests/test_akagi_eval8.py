@@ -1021,3 +1021,154 @@ class TestMawashiTileSelection:
         # Should pick S (idx 28) because it has the best Q-value among safe tiles
         assert result == 28, \
             f"MAWASHI should pick best Q-value among ALL safe tiles, got idx {result} (expected 28=S)"
+
+
+# ============================================================
+# Double riichi post_riichi_safe danger override test
+# ============================================================
+
+class TestDoubleRiichiPostRiichiSafe:
+    """Test that post_riichi_safe override doesn't reduce danger
+    when a tile is only safe against ONE of multiple riichi players.
+
+    Bug: In double riichi, a tile safe against player A but dangerous
+    against player B had its danger incorrectly capped at 0.125, as
+    the override checked only the first matching riichi player (break).
+    Fix: Only reduce danger if tile is safe against ALL riichi opponents.
+    """
+
+    def test_safe_against_one_but_not_both(self):
+        """Tile safe against riichi A but not riichi B should NOT have danger reduced."""
+        from mjai_bot.akagi_supreme.strategy_engine import (
+            StrategyEngine, ACTION_CONFIG_4P, DANGER_SAFE,
+        )
+
+        engine = StrategyEngine(ACTION_CONFIG_4P)
+        gs = engine.gs
+        gs._initialized = True
+        gs.player_id = 0
+        gs.dealer = 1
+        gs.round_wind = "E"
+        gs.num_players = 4
+        gs.turn = 40
+        gs.remaining_tiles = 40
+        gs.my_hand = [
+            "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s",
+            "E", "S", "W", "N",
+        ]
+        gs.visible_counts = [0] * 34
+
+        # Player 1: riichi, 5s is in post_riichi_safe (safe against them)
+        gs.players[1].riichi_declared = True
+        gs.players[1].riichi_turn = 5
+        gs.players[1].river = [("9m", False)]
+        gs.players[1].post_riichi_safe = {"5s"}
+
+        # Player 2: also riichi, 5s is NOT safe against them
+        gs.players[2].riichi_declared = True
+        gs.players[2].riichi_turn = 6
+        gs.players[2].river = [("1p", False)]
+        gs.players[2].post_riichi_safe = set()  # 5s not passed
+
+        ctx = engine._build_safety_context()
+        candidates = engine._score_discards_by_safety([True] * 46, ctx)
+
+        # Find 5s danger (index 22 = 5s)
+        danger_5s = None
+        for idx, danger in candidates:
+            if idx == 22:  # 5s
+                danger_5s = danger
+                break
+
+        assert danger_5s is not None, "5s should be in candidates"
+        # 5s is NOT safe against player 2, so danger should NOT be capped low
+        assert danger_5s > DANGER_SAFE * 0.5, \
+            f"5s is dangerous against riichi player 2, danger should not be reduced. Got {danger_5s}"
+
+    def test_safe_against_all_riichi_reduces_danger(self):
+        """Tile safe against ALL riichi players should have danger reduced."""
+        from mjai_bot.akagi_supreme.strategy_engine import (
+            StrategyEngine, ACTION_CONFIG_4P, DANGER_SAFE,
+        )
+
+        engine = StrategyEngine(ACTION_CONFIG_4P)
+        gs = engine.gs
+        gs._initialized = True
+        gs.player_id = 0
+        gs.dealer = 1
+        gs.round_wind = "E"
+        gs.num_players = 4
+        gs.turn = 40
+        gs.remaining_tiles = 40
+        gs.my_hand = [
+            "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s",
+            "E", "S", "W", "N",
+        ]
+        gs.visible_counts = [0] * 34
+
+        # Player 1: riichi, 5s in post_riichi_safe
+        gs.players[1].riichi_declared = True
+        gs.players[1].riichi_turn = 5
+        gs.players[1].river = [("9m", False)]
+        gs.players[1].post_riichi_safe = {"5s"}
+
+        # Player 2: riichi, 5s also in post_riichi_safe (both passed on it)
+        gs.players[2].riichi_declared = True
+        gs.players[2].riichi_turn = 6
+        gs.players[2].river = [("1p", False)]
+        gs.players[2].post_riichi_safe = {"5s"}
+
+        ctx = engine._build_safety_context()
+        candidates = engine._score_discards_by_safety([True] * 46, ctx)
+
+        danger_5s = None
+        for idx, danger in candidates:
+            if idx == 22:  # 5s
+                danger_5s = danger
+                break
+
+        assert danger_5s is not None, "5s should be in candidates"
+        # 5s is safe against BOTH riichi players → danger should be capped
+        assert danger_5s <= DANGER_SAFE * 0.5, \
+            f"5s is safe against all riichi players, danger should be reduced. Got {danger_5s}"
+
+    def test_single_riichi_still_reduces(self):
+        """Single riichi with post_riichi_safe should still reduce danger (no regression)."""
+        from mjai_bot.akagi_supreme.strategy_engine import (
+            StrategyEngine, ACTION_CONFIG_4P, DANGER_SAFE,
+        )
+
+        engine = StrategyEngine(ACTION_CONFIG_4P)
+        gs = engine.gs
+        gs._initialized = True
+        gs.player_id = 0
+        gs.dealer = 1
+        gs.round_wind = "E"
+        gs.num_players = 4
+        gs.turn = 40
+        gs.remaining_tiles = 40
+        gs.my_hand = [
+            "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s",
+            "E", "S", "W", "N",
+        ]
+        gs.visible_counts = [0] * 34
+
+        # Only player 1 in riichi, 5s is post_riichi_safe
+        gs.players[1].riichi_declared = True
+        gs.players[1].riichi_turn = 5
+        gs.players[1].river = [("9m", False)]
+        gs.players[1].post_riichi_safe = {"5s"}
+
+        ctx = engine._build_safety_context()
+        candidates = engine._score_discards_by_safety([True] * 46, ctx)
+
+        danger_5s = None
+        for idx, danger in candidates:
+            if idx == 22:  # 5s
+                danger_5s = danger
+                break
+
+        assert danger_5s is not None, "5s should be in candidates"
+        # Single riichi, safe against them → danger should be reduced
+        assert danger_5s <= DANGER_SAFE * 0.5, \
+            f"5s is safe against only riichi player, danger should be reduced. Got {danger_5s}"

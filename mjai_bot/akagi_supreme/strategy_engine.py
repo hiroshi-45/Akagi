@@ -813,15 +813,25 @@ class StrategyEngine:
             # declaration and not ronned — confirmed 100% safe against
             # that riichi player.  The safety module doesn't know about
             # post_riichi_safe, so we apply the override here.
+            #
+            # IMPORTANT: Only reduce danger if the tile is confirmed safe
+            # against ALL riichi opponents. In double riichi, a tile safe
+            # against player A but dangerous against player B must NOT
+            # have its danger reduced — dealing into B is still a risk.
             if danger > 0:
                 lookup = tile_base(tile_name)
-                for i, p in enumerate(gs.players):
-                    if i == gs.player_id:
-                        continue
-                    if p.riichi_declared and lookup in p.post_riichi_safe:
-                        # Safe against this riichi player — cap danger
+                riichi_opponents = [
+                    (i, p) for i, p in enumerate(gs.players)
+                    if i != gs.player_id and p.riichi_declared
+                ]
+                if riichi_opponents:
+                    safe_against_all = all(
+                        lookup in p.post_riichi_safe
+                        or lookup in {tile_base(t) for t, _ in p.river}
+                        for _, p in riichi_opponents
+                    )
+                    if safe_against_all:
                         danger = min(danger, DANGER_SAFE * 0.5)
-                        break
 
             candidates.append((idx, danger))
         return candidates
