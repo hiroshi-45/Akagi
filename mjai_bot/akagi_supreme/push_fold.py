@@ -79,7 +79,14 @@ def estimate_hand_value(gs: GameState) -> float:
         if gs.is_my_yakuhai(tile):
             count = sum(1 for t in all_tiles if tile_base(t) == tile)
             if count >= 3:
-                han_estimate += 1.0  # confirmed yakuhai
+                # Double wind: tile is both round wind AND seat wind
+                # (e.g., East dealer in East round). Worth 2 han, not 1.
+                is_double_wind = (
+                    tile not in YAKUHAI_HONORS
+                    and tile == gs.round_wind
+                    and tile == gs.my_wind()
+                )
+                han_estimate += 2.0 if is_double_wind else 1.0
             elif count >= 2:
                 if gs.unseen_count(tile) > 0 and tile in set(hand):
                     han_estimate += 0.4  # possible pon

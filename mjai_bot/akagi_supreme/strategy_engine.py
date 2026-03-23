@@ -643,22 +643,27 @@ class StrategyEngine:
             return q + (isolation * 0.15)
 
         # 2. Pick from the safest available category, prioritizing safety over scoring
+        # Top players in MAWASHI treat ALL tiles in the safe bucket equally and
+        # pick the one with the best hand progression (Q-value). Limiting to only
+        # the N safest tiles misses potentially much better Q-value tiles that are
+        # still well within the safety threshold (all <= DANGER_SAFE = 0.25).
         if safe_tiles:
-            safe_tiles.sort(key=lambda x: x[1])
-            top_safe = safe_tiles[:3]
-            chosen_idx = max(top_safe, key=lambda x: mawashi_score(x[0]))[0]
+            chosen_idx = max(safe_tiles, key=lambda x: mawashi_score(x[0]))[0]
             chosen_name = ACTION_TILE_NAMES[chosen_idx] if chosen_idx < len(ACTION_TILE_NAMES) else str(chosen_idx)
+            safe_tiles.sort(key=lambda x: x[1])
+            top3 = safe_tiles[:3]
             safe_names = ", ".join(
                 f"{ACTION_TILE_NAMES[idx] if idx < len(ACTION_TILE_NAMES) else str(idx)}(危:{d:.2f})"
-                for idx, d in top_safe
+                for idx, d in top3
             )
             self.last_thought.append(f"【安全度分析】安全牌あり（{len(safe_tiles)}候補）→ Q値考慮で「{chosen_name}」選択 [{safe_names}]")
             return chosen_idx
 
         if moderate_tiles:
-            moderate_tiles.sort(key=lambda x: x[1])  # sort by danger
-            top_moderate = moderate_tiles[:2]
-            chosen_idx = max(top_moderate, key=lambda x: mawashi_score(x[0]))[0]
+            # Moderate danger range (0.25-0.60) has more variance, so balance
+            # danger and Q-value: consider all moderate tiles for Q-value tiebreak
+            # rather than artificially limiting the pool.
+            chosen_idx = max(moderate_tiles, key=lambda x: mawashi_score(x[0]))[0]
             chosen_name = ACTION_TILE_NAMES[chosen_idx] if chosen_idx < len(ACTION_TILE_NAMES) else str(chosen_idx)
             self.last_thought.append(f"【安全度分析】安全牌なし → 中程度の危険度から「{chosen_name}」を選択")
             return chosen_idx

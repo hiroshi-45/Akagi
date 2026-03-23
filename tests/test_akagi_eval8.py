@@ -880,3 +880,144 @@ class TestDeadCodeCleanup:
         # Good shape (>=8), decent value → should be MAWASHI or PUSH in late game
         assert result.decision in (Decision.MAWASHI, Decision.PUSH, Decision.FOLD), \
             f"Expected valid decision, got {result.decision}"
+
+
+# ============================================================
+# Double wind yakuhai tests (Eval 19)
+# ============================================================
+
+class TestDoubleWindYakuhai:
+    """Test that double wind (場風+自風) yakuhai is correctly counted as 2 han.
+
+    When a tile is both round wind and seat wind (e.g., East dealer in East
+    round), a triplet gives 2 han: 1 for 場風 (round wind) + 1 for 自風
+    (seat wind). Previously only 1 han was counted, undervaluing dealer hands.
+    """
+
+    def test_double_wind_triplet_2_han(self):
+        """East dealer in East round with East triplet + dora → crosses han threshold.
+
+        Double wind gives 2 han (場風+自風). With 1 dora (3 han) + menzen (0.7),
+        the total ~3.7 han → 3-han point range (5800 dealer).
+        Without double wind fix: 1+1+0.7 = 2.7 han → 2-han range (2900 dealer).
+        """
+        from mjai_bot.akagi_supreme.push_fold import estimate_hand_value
+        gs = GameState()
+        gs._initialized = True
+        gs.player_id = 0
+        gs.dealer = 0  # dealer (seat wind = East)
+        gs.round_wind = "E"  # round wind = East
+        gs.dora_indicators = ["6p"]  # dora = 7p
+        # Closed hand with East triplet + 7p (dora) + other tiles
+        gs.my_hand = [
+            "E", "E", "E", "1p", "2p", "3p", "4s", "5s", "6s",
+            "7m", "8m", "7p", "P",
+        ]
+        gs.players[0].melds = []
+
+        val = estimate_hand_value(gs)
+        # Double wind (2 han) + 1 dora (1 han) + menzen (0.7) = ~3.7 han → 5800 dealer
+        # Without fix: 1 + 1 + 0.7 = 2.7 han → 2900 dealer
+        assert val >= 5800, \
+            f"Double wind + dora should give 3+ han (>=5800pts dealer), got {val}"
+
+    def test_single_wind_triplet_1_han(self):
+        """Non-dealer in East round with East triplet → 1 han (round wind only)."""
+        from mjai_bot.akagi_supreme.push_fold import estimate_hand_value
+        gs = GameState()
+        gs._initialized = True
+        gs.player_id = 1  # non-dealer (seat wind = South)
+        gs.dealer = 0
+        gs.round_wind = "E"
+        gs.dora_indicators = []
+        gs.my_hand = [
+            "E", "E", "E", "1p", "2p", "3p", "4s", "5s", "6s",
+            "7m", "8m", "9m", "P",
+        ]
+        gs.players[1].melds = []
+
+        val = estimate_hand_value(gs)
+        # Single yakuhai (1 han) + menzen (0.7) = ~1.7 han → 2000pts non-dealer
+        assert val < 5800, \
+            f"Single wind should give only 1 han, got {val}"
+
+    def test_sangenpai_not_double_counted(self):
+        """Sangenpai (P/F/C) should NOT be treated as double wind."""
+        from mjai_bot.akagi_supreme.push_fold import estimate_hand_value
+        gs = GameState()
+        gs._initialized = True
+        gs.player_id = 0
+        gs.dealer = 0
+        gs.round_wind = "E"
+        gs.dora_indicators = []
+        gs.my_hand = [
+            "P", "P", "P", "1p", "2p", "3p", "4s", "5s", "6s",
+            "7m", "8m", "9m", "E",
+        ]
+        gs.players[0].melds = []
+
+        val = estimate_hand_value(gs)
+        # Haku (1 han) + menzen bonus → should NOT be treated as double wind
+        # With double wind bug: would incorrectly give 2 han for haku
+        # Haku is in YAKUHAI_HONORS, so the is_double_wind check excludes it
+        assert val < 7700, \
+            f"Sangenpai should not get double wind bonus, got {val}"
+
+
+# ============================================================
+# MAWASHI tile selection pool tests (Eval 19)
+# ============================================================
+
+class TestMawashiTileSelection:
+    """Test that MAWASHI considers ALL safe tiles for Q-value tiebreak.
+
+    Previously limited to top 3 safest, missing better Q-value tiles that
+    were still within the SAFE threshold.
+    """
+
+    def test_mawashi_picks_best_q_among_all_safe(self):
+        """MAWASHI should pick highest Q-value tile among ALL safe tiles."""
+        from mjai_bot.akagi_supreme.strategy_engine import (
+            StrategyEngine, ACTION_CONFIG_4P, DANGER_SAFE, ACTION_TILE_NAMES,
+        )
+        from mjai_bot.akagi_supreme.push_fold import Decision, PushFoldResult
+
+        engine = StrategyEngine(ACTION_CONFIG_4P)
+        gs = engine.gs
+        gs._initialized = True
+        gs.player_id = 0
+        gs.dealer = 1
+        gs.round_wind = "E"
+        gs.num_players = 4
+        gs.turn = 40  # turn 10
+        gs.remaining_tiles = 40
+        # Need enough tiles in hand for isolation scoring
+        gs.my_hand = [
+            "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s",
+            "E", "S", "W", "N",
+        ]
+        gs.visible_counts = [0] * 34
+
+        # Set up riichi opponent to make safety context meaningful
+        gs.players[1].riichi_declared = True
+        gs.players[1].riichi_turn = 5
+        gs.players[1].river = [
+            ("E", False), ("S", True), ("W", False), ("N", True),
+        ]
+
+        # All 4 honor tiles are genbutsu (in riichi player's river)
+        # E=idx29, S=idx28, W=idx30, N=idx31
+        q_values = [0.0] * 46
+        # Set S (idx 28) with much higher Q but slightly higher danger
+        q_values[29] = 0.1   # E
+        q_values[28] = 0.8   # S - best Q-value
+        q_values[30] = 0.15  # W
+        q_values[31] = 0.12  # N
+
+        mask = [True] * 46
+        pf_result = PushFoldResult(Decision.MAWASHI, 0.7, "test")
+
+        result = engine._adjust_discard(29, q_values, mask, pf_result)
+        # Should pick S (idx 28) because it has the best Q-value among safe tiles
+        assert result == 28, \
+            f"MAWASHI should pick best Q-value among ALL safe tiles, got idx {result} (expected 28=S)"
