@@ -660,10 +660,21 @@ class StrategyEngine:
             return chosen_idx
 
         if moderate_tiles:
-            # Moderate danger range (0.25-0.60) has more variance, so balance
-            # danger and Q-value: consider all moderate tiles for Q-value tiebreak
-            # rather than artificially limiting the pool.
-            chosen_idx = max(moderate_tiles, key=lambda x: mawashi_score(x[0]))[0]
+            # Moderate danger range (0.25-0.60) has significant variance.
+            # Unlike SAFE tiles (all ≤0.25 and effectively equivalent),
+            # a 0.58 danger tile is much riskier than a 0.27 tile.
+            # Top players in MAWASHI prefer lower danger within this range,
+            # only accepting higher danger for substantial Q-value advantage.
+            # Penalty: 0.3 * danger normalizes the range so ~0.1 Q-value
+            # difference is needed to overcome the full danger range.
+            def mawashi_moderate_score(idx_danger):
+                idx, danger = idx_danger
+                q = q_values[idx]
+                tile_name = ACTION_TILE_NAMES[idx]
+                isolation = self._tile_isolation_score(tile_name)
+                danger_penalty = danger * 0.3
+                return q + (isolation * 0.15) - danger_penalty
+            chosen_idx = max(moderate_tiles, key=mawashi_moderate_score)[0]
             chosen_name = ACTION_TILE_NAMES[chosen_idx] if chosen_idx < len(ACTION_TILE_NAMES) else str(chosen_idx)
             self.last_thought.append(f"【安全度分析】安全牌なし → 中程度の危険度から「{chosen_name}」を選択")
             return chosen_idx

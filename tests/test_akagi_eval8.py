@@ -1158,3 +1158,130 @@ class TestAllLast3rdPreferDamatenExtended:
         # Gap is 3000 (>= 2000), so prefer_damaten should NOT be set by gap-protection
         assert adj.prefer_damaten is False, \
             f"All-last 3rd with 4th 3000pts behind should not force damaten, got: {adj.reason}"
+
+
+# ============================================================
+# MAWASHI moderate tile danger-weighted selection (Eval 20)
+# ============================================================
+
+class TestMawashiModerateDangerWeighting:
+    """Test that MAWASHI considers danger within the moderate range (0.25-0.60).
+
+    Previously, moderate tiles were selected purely by Q-value + isolation,
+    ignoring that danger 0.58 is far riskier than 0.27. Top players in MAWASHI
+    prefer lower danger within the moderate range, only accepting higher danger
+    for substantial Q-value advantage.
+    """
+
+    def test_moderate_prefers_safer_tile_over_marginal_q(self):
+        """Among moderate tiles, prefer safer tile when Q-value difference is small."""
+        from mjai_bot.akagi_supreme.strategy_engine import (
+            StrategyEngine, ACTION_CONFIG_4P, DANGER_SAFE, DANGER_MODERATE,
+            ACTION_TILE_NAMES,
+        )
+        from mjai_bot.akagi_supreme.push_fold import Decision, PushFoldResult
+
+        engine = StrategyEngine(ACTION_CONFIG_4P)
+        gs = engine.gs
+        gs._initialized = True
+        gs.player_id = 0
+        gs.dealer = 1
+        gs.round_wind = "E"
+        gs.num_players = 4
+        gs.turn = 40
+        gs.remaining_tiles = 40
+        gs.my_hand = [
+            "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s",
+            "E", "S", "W", "N",
+        ]
+        gs.visible_counts = [0] * 34
+
+        # Set up riichi opponent to create meaningful safety context
+        gs.players[1].riichi_declared = True
+        gs.players[1].riichi_turn = 5
+        gs.players[1].river = [("1p", False)]
+
+        # We need to mock _score_discards_by_safety to control danger values
+        # Instead, test via _adjust_discard with a controlled pf_result
+        q_values = [0.0] * 46
+        # S (idx 28) has slightly better Q but higher danger
+        q_values[28] = 0.20  # S - slightly better Q
+        q_values[29] = 0.18  # E - slightly worse Q but safer
+
+        mask = [False] * 46
+        mask[28] = True  # S
+        mask[29] = True  # E
+
+        pf_result = PushFoldResult(Decision.MAWASHI, 0.7, "test")
+
+        # Monkey-patch _score_discards_by_safety to return controlled danger values
+        original_fn = engine._score_discards_by_safety
+
+        def mock_score(mask_arg, ctx_arg):
+            # Return only moderate-danger tiles with different dangers
+            return [(28, 0.55), (29, 0.28)]  # S=high moderate, E=low moderate
+
+        engine._score_discards_by_safety = mock_score
+
+        try:
+            result = engine._adjust_discard(28, q_values, mask, pf_result)
+            # E (idx 29) should be preferred: danger 0.28 vs 0.55,
+            # and Q difference (0.02) is not enough to overcome the danger gap
+            # danger penalty: 0.55*0.3 - 0.28*0.3 = 0.081 > Q diff of 0.02
+            assert result == 29, \
+                f"MAWASHI should prefer safer moderate tile (E=29) over slightly better Q (S=28), got idx {result}"
+        finally:
+            engine._score_discards_by_safety = original_fn
+
+    def test_moderate_allows_better_q_when_danger_similar(self):
+        """When moderate tiles have similar danger, Q-value should win."""
+        from mjai_bot.akagi_supreme.strategy_engine import (
+            StrategyEngine, ACTION_CONFIG_4P, ACTION_TILE_NAMES,
+        )
+        from mjai_bot.akagi_supreme.push_fold import Decision, PushFoldResult
+
+        engine = StrategyEngine(ACTION_CONFIG_4P)
+        gs = engine.gs
+        gs._initialized = True
+        gs.player_id = 0
+        gs.dealer = 1
+        gs.round_wind = "E"
+        gs.num_players = 4
+        gs.turn = 40
+        gs.remaining_tiles = 40
+        gs.my_hand = [
+            "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s",
+            "E", "S", "W", "N",
+        ]
+        gs.visible_counts = [0] * 34
+
+        gs.players[1].riichi_declared = True
+        gs.players[1].riichi_turn = 5
+        gs.players[1].river = [("1p", False)]
+
+        q_values = [0.0] * 46
+        q_values[28] = 0.40  # S - much better Q
+        q_values[29] = 0.10  # E - much worse Q
+
+        mask = [False] * 46
+        mask[28] = True
+        mask[29] = True
+
+        pf_result = PushFoldResult(Decision.MAWASHI, 0.7, "test")
+
+        original_fn = engine._score_discards_by_safety
+
+        def mock_score(mask_arg, ctx_arg):
+            # Similar danger levels
+            return [(28, 0.35), (29, 0.32)]
+
+        engine._score_discards_by_safety = mock_score
+
+        try:
+            result = engine._adjust_discard(28, q_values, mask, pf_result)
+            # S (idx 28) should win: danger difference is tiny (0.03)
+            # but Q-value advantage is huge (0.30)
+            assert result == 28, \
+                f"When danger is similar, better Q tile should win. Got idx {result}"
+        finally:
+            engine._score_discards_by_safety = original_fn
